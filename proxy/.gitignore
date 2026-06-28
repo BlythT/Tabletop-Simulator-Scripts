@@ -1,0 +1,6 @@
+scryfall.db
+scryfall.db.tmp
+*.db
+*.db.tmp
+*.exe
+coverage.out
