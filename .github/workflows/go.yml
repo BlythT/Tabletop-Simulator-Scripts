@@ -1,0 +1,33 @@
+name: Go Proxy CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: 'stable'
+        cache-dependency-path: proxy/go.sum
+
+    - name: Build Proxy
+      working-directory: proxy
+      run: go build -v ./...
+
+    - name: Run Unit & Integration Tests
+      working-directory: proxy
+      run: go test -v -coverprofile=coverage.out ./...
+
+    - name: Run Benchmarks
+      working-directory: proxy
+      run: go test -v -bench="." -benchmem ./...
