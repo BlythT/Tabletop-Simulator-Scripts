@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tts-importer-proxy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+    restart: unless-stopped

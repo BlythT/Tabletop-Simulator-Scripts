@@ -703,6 +703,7 @@ func TestAdminUpdateFlow(t *testing.T) {
 
 	// Test GET /admin/update/status when idle
 	reqStatus := httptest.NewRequest("GET", "/admin/update/status", nil)
+	reqStatus.RemoteAddr = "127.0.0.1:1234"
 	wStatus := httptest.NewRecorder()
 	server.ServeHTTP(wStatus, reqStatus)
 	if wStatus.Result().StatusCode != http.StatusOK {
@@ -716,6 +717,7 @@ func TestAdminUpdateFlow(t *testing.T) {
 
 	// Test POST /admin/update
 	reqUpdate := httptest.NewRequest("POST", "/admin/update", nil)
+	reqUpdate.RemoteAddr = "127.0.0.1:1234"
 	wUpdate := httptest.NewRecorder()
 	server.ServeHTTP(wUpdate, reqUpdate)
 	if wUpdate.Result().StatusCode != http.StatusAccepted {
@@ -771,12 +773,14 @@ func TestAdminUpdateFailure(t *testing.T) {
 
 	// Trigger update
 	reqUpdate := httptest.NewRequest("POST", "/admin/update", nil)
+	reqUpdate.RemoteAddr = "127.0.0.1:1234"
 	wUpdate := httptest.NewRecorder()
 	server.ServeHTTP(wUpdate, reqUpdate)
 
 	// Wait up to 5 seconds for status to change to "failed"
 	deadline := time.Now().Add(5 * time.Second)
 	reqStatus := httptest.NewRequest("GET", "/admin/update/status", nil)
+	reqStatus.RemoteAddr = "127.0.0.1:1234"
 	for time.Now().Before(deadline) {
 		wPoll := httptest.NewRecorder()
 		server.ServeHTTP(wPoll, reqStatus)
@@ -809,6 +813,29 @@ func TestLuaE2EIntegration(t *testing.T) {
 	}
 
 	t.Logf("Lua E2E test completed successfully!\nOutput:\n%s", string(output))
+}
+
+func TestAdminUpdateForbidden(t *testing.T) {
+	repo := &MockRepository{}
+	server := NewServer(repo, 0)
+
+	// Test GET /admin/update/status from non-loopback IP
+	reqStatus := httptest.NewRequest("GET", "/admin/update/status", nil)
+	reqStatus.RemoteAddr = "192.168.1.50:1234" // Non-loopback
+	wStatus := httptest.NewRecorder()
+	server.ServeHTTP(wStatus, reqStatus)
+	if wStatus.Result().StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden, got %d", wStatus.Result().StatusCode)
+	}
+
+	// Test POST /admin/update from non-loopback IP
+	reqUpdate := httptest.NewRequest("POST", "/admin/update", nil)
+	reqUpdate.RemoteAddr = "192.168.1.50:1234"
+	wUpdate := httptest.NewRecorder()
+	server.ServeHTTP(wUpdate, reqUpdate)
+	if wUpdate.Result().StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden, got %d", wUpdate.Result().StatusCode)
+	}
 }
 
 

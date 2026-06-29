@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -41,15 +43,37 @@ func NewServer(repo CardRepository, port int) *Server {
 	mux.HandleFunc("GET /cards/{id}", s.handleID)
 	mux.HandleFunc("GET /cards/{id}/rulings", s.handleRulingsPassthrough)
 	mux.HandleFunc("POST /batch", s.handleBatch)
-	mux.HandleFunc("POST /admin/update", s.handleAdminUpdate)
-	mux.HandleFunc("GET /admin/update/status", s.handleAdminUpdateStatus)
+	
+	// Admin endpoints wrapped in local-only loopback middleware
+	mux.Handle("POST /admin/update", s.localOnlyMiddleware(http.HandlerFunc(s.handleAdminUpdate)))
+	mux.Handle("GET /admin/update/status", s.localOnlyMiddleware(http.HandlerFunc(s.handleAdminUpdateStatus)))
 
 	s.mux = mux
 	return s
 }
 
+func (s *Server) localOnlyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			s.sendError(w, "Forbidden: Invalid connection origin", http.StatusForbidden)
+			return
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			s.sendError(w, "Forbidden: Admin endpoints are restricted to localhost connections", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) Start() error {
-	addr := fmt.Sprintf("127.0.0.1:%d", s.port) // Bind to localhost (127.0.0.1) for local-first security
+	host := "127.0.0.1" // Bind to localhost (127.0.0.1) by default for local-first host security
+	if envHost := os.Getenv("HOST"); envHost != "" {
+		host = envHost
+	}
+	addr := fmt.Sprintf("%s:%d", host, s.port)
 	fmt.Printf("HTTP Server starting on http://%s\n", addr)
 	return http.ListenAndServe(addr, s.corsMiddleware(s.mux))
 }
