@@ -1,7 +1,7 @@
 --By Amuzet
 mod_name,version='Card Importer',999.0
 self.setName('[854FD9]'..mod_name..' [49D54F]'..version)
-local PROXY_URL = 'http://localhost:8000'
+PROXY_URL = PROXY_URL or 'http://localhost:8000'
 author,WorkshopID,GITURL='76561198045776458','https://steamcommunity.com/sharedfiles/filedetails/?id=1838051922','https://raw.githubusercontent.com/Amuzet/Tabletop-Simulator-Scripts/master/Magic/Importer.lua'
 coauthor='76561197968157267'--PIE
 lang='en'

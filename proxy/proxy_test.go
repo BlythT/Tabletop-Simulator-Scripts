@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -165,28 +166,28 @@ func (m *MockRepository) GetByID(ctx context.Context, id string) ([]byte, error)
 	if id == "NotFoundID" {
 		return nil, sql.ErrNoRows
 	}
-	return []byte(`{"object":"card","id":"` + id + `"}`), nil
+	return []byte(`{"object":"card","id":"` + id + `","name":"Black Lotus","type_line":"Artifact","cmc":0.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`), nil
 }
 
 func (m *MockRepository) GetByNamed(ctx context.Context, fuzzy string, setCode string) ([]byte, error) {
 	if fuzzy == "NotFoundCard" {
 		return nil, sql.ErrNoRows
 	}
-	return []byte(`{"object":"card","name":"` + fuzzy + `"}`), nil
+	return []byte(`{"object":"card","id":"mock-id-bolt","name":"` + fuzzy + `","type_line":"Instant","cmc":1.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`), nil
 }
 
 func (m *MockRepository) GetBySetCol(ctx context.Context, setCode, colNum, lang string) ([]byte, error) {
 	if setCode == "notfound" {
 		return nil, sql.ErrNoRows
 	}
-	return []byte(`{"object":"card","set":"` + setCode + `","collector_number":"` + colNum + `"}`), nil
+	return []byte(`{"object":"card","id":"mock-id-setcol","name":"Custom Card","set":"` + setCode + `","collector_number":"` + colNum + `","type_line":"Creature","cmc":3.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`), nil
 }
 
 func (m *MockRepository) GetRandom(ctx context.Context, qParam string) ([]byte, error) {
 	if strings.Contains(qParam, "NotFound") {
 		return nil, sql.ErrNoRows
 	}
-	return []byte(`{"object":"card","name":"Random Card"}`), nil
+	return []byte(`{"object":"card","id":"mock-id-random","name":"Random Card","type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`), nil
 }
 
 func (m *MockRepository) Search(ctx context.Context, qParam, unique string) ([]byte, error) {
@@ -221,35 +222,35 @@ func TestServerEndpoints(t *testing.T) {
 			method:         "GET",
 			url:            "/cards/named?fuzzy=Lightning+Bolt",
 			wantStatusCode: http.StatusOK,
-			wantBody:       `{"object":"card","name":"Lightning Bolt"}`,
+			wantBody:       `{"object":"card","id":"mock-id-bolt","name":"Lightning Bolt","type_line":"Instant","cmc":1.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`,
 		},
 		{
 			name:           "Named endpoint exact match",
 			method:         "GET",
 			url:            "/cards/named?exact=Lightning+Bolt",
 			wantStatusCode: http.StatusOK,
-			wantBody:       `{"object":"card","name":"Lightning Bolt"}`,
+			wantBody:       `{"object":"card","id":"mock-id-bolt","name":"Lightning Bolt","type_line":"Instant","cmc":1.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`,
 		},
 		{
 			name:           "Random endpoint match",
 			method:         "GET",
 			url:            "/cards/random?q=set:kld",
 			wantStatusCode: http.StatusOK,
-			wantBody:       `{"object":"card","name":"Random Card"}`,
+			wantBody:       `{"object":"card","id":"mock-id-random","name":"Random Card","type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`,
 		},
 		{
 			name:           "Fallback Set/Collector URL pattern",
 			method:         "GET",
 			url:            "/cards/kld/128",
 			wantStatusCode: http.StatusOK,
-			wantBody:       `{"object":"card","set":"kld","collector_number":"128"}`,
+			wantBody:       `{"object":"card","id":"mock-id-setcol","name":"Custom Card","set":"kld","collector_number":"128","type_line":"Creature","cmc":3.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`,
 		},
 		{
 			name:           "Fallback UUID pattern",
 			method:         "GET",
 			url:            "/cards/uuid-123-abc",
 			wantStatusCode: http.StatusOK,
-			wantBody:       `{"object":"card","id":"uuid-123-abc"}`,
+			wantBody:       `{"object":"card","id":"uuid-123-abc","name":"Black Lotus","type_line":"Artifact","cmc":0.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`,
 		},
 		{
 			name:           "Batch POST endpoint",
@@ -257,7 +258,7 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":["https://api.scryfall.com/cards/named?fuzzy=Lightning%20Bolt","https://api.scryfall.com/cards/uuid-123-abc"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"object":"card","name":"Lightning Bolt"},{"object":"card","id":"uuid-123-abc"}]`,
+			wantBody:       `[{"object":"card","id":"mock-id-bolt","name":"Lightning Bolt","type_line":"Instant","cmc":1.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}},{"object":"card","id":"uuid-123-abc","name":"Black Lotus","type_line":"Artifact","cmc":0.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}]`,
 		},
 		{
 			name:           "Search endpoint match",
@@ -337,7 +338,7 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":["https://api.scryfall.com/cards/sld/901/fr"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"object":"card","set":"sld","collector_number":"901"}]`,
+			wantBody:       `[{"object":"card","id":"mock-id-setcol","name":"Custom Card","set":"sld","collector_number":"901","type_line":"Creature","cmc":3.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}]`,
 		},
 		{
 			name:           "Batch POST endpoint with malformed URL",
@@ -786,6 +787,28 @@ func TestAdminUpdateFailure(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func TestLuaE2EIntegration(t *testing.T) {
+	_, err := exec.LookPath("lua")
+	if err != nil {
+		t.Skip("lua interpreter not found in path, skipping E2E integration test")
+	}
+
+	mockRepo := &MockRepository{}
+	server := NewServer(mockRepo, 0)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	cmd := exec.Command("lua", "Magic/importer_test_runner.lua", ts.URL)
+	cmd.Dir = ".." // Run from project root folder where Magic/ is located
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Lua E2E integration test failed: %v\nOutput:\n%s", err, string(output))
+	}
+
+	t.Logf("Lua E2E test completed successfully!\nOutput:\n%s", string(output))
 }
 
 
