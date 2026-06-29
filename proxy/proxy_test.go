@@ -196,6 +196,10 @@ func (m *MockRepository) Search(ctx context.Context, qParam, unique string) ([]b
 	return []byte(`{"object":"list","data":[]}`), nil
 }
 
+func (m *MockRepository) Reload(ctx context.Context, tempDBPath string) error {
+	return nil
+}
+
 func (m *MockRepository) Close() error {
 	return nil
 }
@@ -508,6 +512,11 @@ func TestSQLiteRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
 	}
+
+	// Test Reload error (rename failure)
+	if err := repo.Reload(ctx, "nonexistent.db"); err == nil {
+		t.Errorf("expected Reload to fail for non-existent temp file")
+	}
 }
 
 func TestCardUnmarshalJSON(t *testing.T) {
@@ -533,40 +542,7 @@ func TestCardUnmarshalJSON(t *testing.T) {
 	}
 }
 
-func TestCopyFile(t *testing.T) {
-	src := "test_src.txt"
-	dst := "test_dst.txt"
-	defer os.Remove(src)
-	defer os.Remove(dst)
 
-	content := "Hello, copy!"
-	if err := os.WriteFile(src, []byte(content), 0644); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-
-	if err := CopyFile(src, dst); err != nil {
-		t.Fatalf("CopyFile failed: %v", err)
-	}
-
-	got, err := os.ReadFile(dst)
-	if err != nil {
-		t.Fatalf("failed to read destination file: %v", err)
-	}
-
-	if string(got) != content {
-		t.Errorf("copied content mismatch: got %q, want %q", string(got), content)
-	}
-
-	// Test CopyFile error path (non-existent source)
-	if err := CopyFile("nonexistent.txt", "dst.txt"); err == nil {
-		t.Errorf("expected CopyFile to fail for non-existent source")
-	}
-
-	// Test CopyFile error path (destination is a directory)
-	if err := CopyFile(src, "."); err == nil {
-		t.Errorf("expected CopyFile to fail when destination is a directory")
-	}
-}
 
 func TestRulingsPassthrough(t *testing.T) {
 	mockScryfall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -667,6 +643,149 @@ func TestServerStart(t *testing.T) {
 		_ = server.Start()
 	}()
 	time.Sleep(10 * time.Millisecond)
+}
+
+func TestAdminUpdateFlow(t *testing.T) {
+	// Mock bulk manifest and default-cards data
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/bulk-data" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(fmt.Sprintf(`{
+				"object": "list",
+				"data": [
+					{
+						"type": "default_cards",
+						"download_uri": "%s/default-cards.json"
+					}
+				]
+			}`, "http://"+r.Host)))
+			return
+		}
+		if r.URL.Path == "/default-cards.json" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[
+				{
+					"id": "lotus-999",
+					"name": "Black Lotus Ingested",
+					"set": "vma",
+					"collector_number": "4",
+					"lang": "en"
+				}
+			]`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	oldManifestURL := bulkDataManifestURL
+	bulkDataManifestURL = mockServer.URL + "/bulk-data"
+	defer func() { bulkDataManifestURL = oldManifestURL }()
+
+	// Create real repository to test actual Reload and file swap under lock!
+	dbPath := "test_admin_update.db"
+	defer os.Remove(dbPath)
+	defer os.Remove(dbPath + ".tmp")
+
+	repo, err := NewSQLiteRepository(dbPath)
+	if err != nil {
+		t.Fatalf("failed to init repo: %v", err)
+	}
+	defer repo.Close()
+
+	ctx := context.Background()
+	if err := repo.Init(ctx); err != nil {
+		t.Fatalf("failed to init schema: %v", err)
+	}
+
+	server := NewServer(repo, 0)
+
+	// Test GET /admin/update/status when idle
+	reqStatus := httptest.NewRequest("GET", "/admin/update/status", nil)
+	wStatus := httptest.NewRecorder()
+	server.ServeHTTP(wStatus, reqStatus)
+	if wStatus.Result().StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", wStatus.Result().StatusCode)
+	}
+	var statusMap map[string]string
+	json.NewDecoder(wStatus.Body).Decode(&statusMap)
+	if statusMap["status"] != "idle" {
+		t.Errorf("expected status idle, got %s", statusMap["status"])
+	}
+
+	// Test POST /admin/update
+	reqUpdate := httptest.NewRequest("POST", "/admin/update", nil)
+	wUpdate := httptest.NewRecorder()
+	server.ServeHTTP(wUpdate, reqUpdate)
+	if wUpdate.Result().StatusCode != http.StatusAccepted {
+		t.Errorf("expected 202 Accepted, got %d", wUpdate.Result().StatusCode)
+	}
+
+	// Try triggering again to verify 409 Conflict
+	wConflict := httptest.NewRecorder()
+	server.ServeHTTP(wConflict, reqUpdate)
+	if wConflict.Result().StatusCode != http.StatusConflict {
+		t.Errorf("expected 409 Conflict, got %d", wConflict.Result().StatusCode)
+	}
+
+	// Poll status until it is no longer running (wait up to 5 seconds)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		wPoll := httptest.NewRecorder()
+		server.ServeHTTP(wPoll, reqStatus)
+		var m map[string]string
+		json.NewDecoder(wPoll.Body).Decode(&m)
+		if strings.HasPrefix(m["status"], "success") {
+			break
+		}
+		if strings.HasPrefix(m["status"], "failed") {
+			t.Fatalf("update failed: %s", m["status"])
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Verify that the new database Lotus card exists!
+	bytes, err := repo.GetByID(ctx, "lotus-999")
+	if err != nil {
+		t.Fatalf("failed to get card after reload: %v", err)
+	}
+	if !strings.Contains(string(bytes), "Black Lotus Ingested") {
+		t.Errorf("unexpected card json content: %s", string(bytes))
+	}
+}
+
+func TestAdminUpdateFailure(t *testing.T) {
+	oldManifestURL := bulkDataManifestURL
+	bulkDataManifestURL = "http://invalid-domain-should-fail"
+	defer func() { bulkDataManifestURL = oldManifestURL }()
+
+	repo, err := NewSQLiteRepository("test_fail.db")
+	if err != nil {
+		t.Fatalf("failed to init repo: %v", err)
+	}
+	defer repo.Close()
+	defer os.Remove("test_fail.db")
+
+	server := NewServer(repo, 0)
+
+	// Trigger update
+	reqUpdate := httptest.NewRequest("POST", "/admin/update", nil)
+	wUpdate := httptest.NewRecorder()
+	server.ServeHTTP(wUpdate, reqUpdate)
+
+	// Wait up to 5 seconds for status to change to "failed"
+	deadline := time.Now().Add(5 * time.Second)
+	reqStatus := httptest.NewRequest("GET", "/admin/update/status", nil)
+	for time.Now().Before(deadline) {
+		wPoll := httptest.NewRecorder()
+		server.ServeHTTP(wPoll, reqStatus)
+		var m map[string]string
+		json.NewDecoder(wPoll.Body).Decode(&m)
+		if strings.HasPrefix(m["status"], "failed") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 

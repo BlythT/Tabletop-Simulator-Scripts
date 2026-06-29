@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"time"
@@ -23,7 +22,9 @@ type BulkManifest struct {
 	Data []BulkManifestEntry `json:"data"`
 }
 
-func UpdateDatabase(ctx context.Context, dbPath string) error {
+// UpdateDatabase fetches the Scryfall manifest, downloads the bulk card data,
+// and populates the temporary database at tempDBPath.
+func UpdateDatabase(ctx context.Context, tempDBPath string) error {
 	fmt.Println("Fetching Scryfall bulk data manifest...")
 	
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -61,9 +62,8 @@ func UpdateDatabase(ctx context.Context, dbPath string) error {
 		return fmt.Errorf("could not find default_cards download URL in manifest")
 	}
 
-	tempDBPath := dbPath + ".tmp"
 	// Remove old temporary file if it exists
-	os.Remove(tempDBPath)
+	_ = os.Remove(tempDBPath)
 
 	fmt.Printf("Initializing temporary database at %s...\n", tempDBPath)
 	repo, err := NewSQLiteRepository(tempDBPath)
@@ -84,7 +84,7 @@ func UpdateDatabase(ctx context.Context, dbPath string) error {
 	reqDownload.Header.Set("User-Agent", UserAgent)
 	reqDownload.Header.Set("Accept", "*/*")
 	
-	// Default cards download might take a while, use a generous timeout or none for the client
+	// Default cards download might take a while, use a generous timeout
 	downloadClient := &http.Client{Timeout: 10 * time.Minute}
 	respDownload, err := downloadClient.Do(reqDownload)
 	if err != nil {
@@ -152,45 +152,5 @@ func UpdateDatabase(ctx context.Context, dbPath string) error {
 	}
 
 	fmt.Printf("Successfully ingested %d cards.\n", count)
-
-	// Close repository to release file handles
-	if err := repo.Close(); err != nil {
-		return fmt.Errorf("failed to close repository: %w", err)
-	}
-
-	// Replace the active database with the temp database atomically
-	fmt.Printf("Replacing active database file '%s' with '%s'...\n", dbPath, tempDBPath)
-	if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
-		// If remove fails (e.g. file is locked), overwrite in-place by copying
-		fmt.Printf("Database file '%s' is locked. Overwriting in-place via copy...\n", dbPath)
-		if errCopy := CopyFile(tempDBPath, dbPath); errCopy != nil {
-			return fmt.Errorf("failed to copy database: %w (remove error: %v)", errCopy, err)
-		}
-		os.Remove(tempDBPath)
-	} else {
-		if err := os.Rename(tempDBPath, dbPath); err != nil {
-			return fmt.Errorf("failed to rename database: %w", err)
-		}
-	}
-
-	fmt.Println("Database update complete!")
 	return nil
-}
-
-// CopyFile copies a file from src to dst.
-func CopyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, in)
-	return err
 }

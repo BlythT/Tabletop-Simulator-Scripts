@@ -9,82 +9,68 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 )
 
 var scryfallBaseURL = "https://api.scryfall.com"
 
 type Server struct {
-	repo CardRepository
-	port int
+	repo         CardRepository
+	port         int
+	updateMutex  sync.Mutex
+	updateStatus string // "idle", "running", "success: <timestamp>", "failed: <error>"
+	mux          *http.ServeMux
 }
 
 func NewServer(repo CardRepository, port int) *Server {
-	return &Server{
-		repo: repo,
-		port: port,
+	s := &Server{
+		repo:         repo,
+		port:         port,
+		updateStatus: "idle",
 	}
+
+	mux := http.NewServeMux()
+
+	// Go 1.22 structured pattern-matched routing
+	mux.HandleFunc("GET /cards/named", s.handleNamed)
+	mux.HandleFunc("GET /cards/search", s.handleSearch)
+	mux.HandleFunc("GET /cards/random", s.handleRandom)
+	mux.HandleFunc("GET /cards/{set}/{col}", s.handleSetCol)
+	mux.HandleFunc("GET /cards/{set}/{col}/{lang}", s.handleSetCol)
+	mux.HandleFunc("GET /cards/{id}", s.handleID)
+	mux.HandleFunc("GET /cards/{id}/rulings", s.handleRulingsPassthrough)
+	mux.HandleFunc("POST /batch", s.handleBatch)
+	mux.HandleFunc("POST /admin/update", s.handleAdminUpdate)
+	mux.HandleFunc("GET /admin/update/status", s.handleAdminUpdateStatus)
+
+	s.mux = mux
+	return s
 }
 
 func (s *Server) Start() error {
-	addr := fmt.Sprintf(":%d", s.port)
-	fmt.Printf("HTTP Server starting on http://localhost:%d\n", s.port)
-	return http.ListenAndServe(addr, s)
+	addr := fmt.Sprintf("127.0.0.1:%d", s.port) // Bind to localhost (127.0.0.1) for local-first security
+	fmt.Printf("HTTP Server starting on http://%s\n", addr)
+	return http.ListenAndServe(addr, s.corsMiddleware(s.mux))
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Enable CORS
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	s.corsMiddleware(s.mux).ServeHTTP(w, r)
+}
 
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
-	path := r.URL.Path
-
-	// Passthrough for rulings
-	if strings.HasSuffix(path, "/rulings") {
-		s.handleRulingsPassthrough(w, r)
-		return
-	}
-
-	if r.Method == http.MethodGet {
-		if path == "/cards/named" {
-			s.handleNamed(w, r)
-			return
-		}
-		if path == "/cards/search" {
-			s.handleSearch(w, r)
-			return
-		}
-		if path == "/cards/random" {
-			s.handleRandom(w, r)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 
-		// Match /cards/{set}/{col} or /cards/{set}/{col}/{lang}
-		parts := strings.Split(strings.Trim(path, "/"), "/")
-		if len(parts) >= 3 && parts[0] == "cards" {
-			s.handleSetCol(w, r, parts[1], parts[2], parts)
-			return
-		}
-
-		// Match /cards/{id}
-		if len(parts) == 2 && parts[0] == "cards" {
-			s.handleID(w, r, parts[1])
-			return
-		}
-
-	} else if r.Method == http.MethodPost {
-		if path == "/batch" {
-			s.handleBatch(w, r)
-			return
-		}
-	}
-
-	s.sendError(w, "Endpoint not supported by proxy server", http.StatusNotFound)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleNamed(w http.ResponseWriter, r *http.Request) {
@@ -103,7 +89,8 @@ func (s *Server) handleNamed(w http.ResponseWriter, r *http.Request) {
 	if err == sql.ErrNoRows {
 		s.sendError(w, fmt.Sprintf("Card not found matching query: %s", fuzzy), http.StatusNotFound)
 		return
-	} else if err != nil {
+	}
+	if err != nil {
 		s.sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -145,17 +132,20 @@ func (s *Server) handleRandom(w http.ResponseWriter, r *http.Request) {
 	w.Write(bytes)
 }
 
-func (s *Server) handleSetCol(w http.ResponseWriter, r *http.Request, setCode, colNum string, parts []string) {
-	lang := "en"
-	if len(parts) >= 4 {
-		lang = parts[3]
+func (s *Server) handleSetCol(w http.ResponseWriter, r *http.Request) {
+	setCode := r.PathValue("set")
+	colNum := r.PathValue("col")
+	lang := r.PathValue("lang")
+	if lang == "" {
+		lang = "en"
 	}
 
 	bytes, err := s.repo.GetBySetCol(r.Context(), setCode, colNum, lang)
 	if err == sql.ErrNoRows {
 		s.sendError(w, fmt.Sprintf("Card not found matching Set: %s, Col: %s, Lang: %s", setCode, colNum, lang), http.StatusNotFound)
 		return
-	} else if err != nil {
+	}
+	if err != nil {
 		s.sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -164,12 +154,20 @@ func (s *Server) handleSetCol(w http.ResponseWriter, r *http.Request, setCode, c
 	w.Write(bytes)
 }
 
-func (s *Server) handleID(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleID(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	// Prevent keyword collision
+	if id == "search" || id == "named" || id == "random" {
+		s.sendError(w, "Endpoint not supported by proxy server", http.StatusNotFound)
+		return
+	}
+
 	bytes, err := s.repo.GetByID(r.Context(), id)
 	if err == sql.ErrNoRows {
 		s.sendError(w, fmt.Sprintf("Card not found with ID: %s", id), http.StatusNotFound)
 		return
-	} else if err != nil {
+	}
+	if err != nil {
 		s.sendError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -189,14 +187,8 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte("["))
-
-	for i, urlStr := range req.URLs {
-		if i > 0 {
-			w.Write([]byte(","))
-		}
-
+	var batchResults []json.RawMessage
+	for _, urlStr := range req.URLs {
 		cardBytes, err := s.resolveURL(r.Context(), urlStr)
 		if err != nil {
 			errObj := map[string]any{
@@ -206,13 +198,16 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 				"details": fmt.Sprintf("Card not found for: %s", urlStr),
 			}
 			errBytes, _ := json.Marshal(errObj)
-			w.Write(errBytes)
+			batchResults = append(batchResults, json.RawMessage(errBytes))
 		} else {
-			w.Write(cardBytes)
+			batchResults = append(batchResults, json.RawMessage(cardBytes))
 		}
 	}
 
-	w.Write([]byte("]"))
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(batchResults); err != nil {
+		s.sendError(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (s *Server) resolveURL(ctx context.Context, urlStr string) ([]byte, error) {
@@ -237,7 +232,7 @@ func (s *Server) resolveURL(ctx context.Context, urlStr string) ([]byte, error) 
 		return s.repo.GetByNamed(ctx, fuzzy, setCode)
 	}
 
-	// 2. /cards/{set}/{col}
+	// 2. /cards/{set}/{col}/{lang}
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) >= 3 && parts[0] == "cards" {
 		setCode := parts[1]
@@ -261,7 +256,8 @@ func (s *Server) resolveURL(ctx context.Context, urlStr string) ([]byte, error) 
 }
 
 func (s *Server) handleRulingsPassthrough(w http.ResponseWriter, r *http.Request) {
-	scryfallURL := scryfallBaseURL + r.URL.Path
+	id := r.PathValue("id")
+	scryfallURL := fmt.Sprintf("%s/cards/%s/rulings", scryfallBaseURL, id)
 	if r.URL.RawQuery != "" {
 		scryfallURL += "?" + r.URL.RawQuery
 	}
@@ -286,6 +282,56 @@ func (s *Server) handleRulingsPassthrough(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+func (s *Server) handleAdminUpdate(w http.ResponseWriter, r *http.Request) {
+	s.updateMutex.Lock()
+	if s.updateStatus == "running" {
+		s.updateMutex.Unlock()
+		s.sendError(w, "Update already in progress", http.StatusConflict)
+		return
+	}
+	s.updateStatus = "running"
+	s.updateMutex.Unlock()
+
+	// Trigger update in a background goroutine
+	go func() {
+		ctx := context.Background()
+		tempDBPath := "scryfall.db.tmp"
+
+		err := UpdateDatabase(ctx, tempDBPath)
+		s.updateMutex.Lock()
+		defer s.updateMutex.Unlock()
+
+		if err != nil {
+			s.updateStatus = "failed: " + err.Error()
+			fmt.Printf("Background update failed: %v\n", err)
+			return
+		}
+
+		// Reload database under write lock
+		if err := s.repo.Reload(ctx, tempDBPath); err != nil {
+			s.updateStatus = "failed to reload: " + err.Error()
+			fmt.Printf("Database reload failed: %v\n", err)
+			return
+		}
+
+		s.updateStatus = "success: " + time.Now().Format(time.RFC3339)
+		fmt.Println("Background update and database swap complete!")
+	}()
+
+	w.WriteHeader(http.StatusAccepted)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "update started"})
+}
+
+func (s *Server) handleAdminUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	s.updateMutex.Lock()
+	status := s.updateStatus
+	s.updateMutex.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": status})
 }
 
 func (s *Server) sendError(w http.ResponseWriter, message string, statusCode int) {

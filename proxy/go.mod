@@ -1,6 +1,6 @@
 module tts-importer-proxy
 
-go 1.20
+go 1.22
 
 require github.com/glebarez/go-sqlite v1.21.2
 
