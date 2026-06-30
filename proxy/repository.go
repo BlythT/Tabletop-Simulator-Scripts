@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"os"
 	"regexp"
@@ -250,8 +251,20 @@ func (r *SQLiteRepository) GetRandom(ctx context.Context, qParam string) ([]byte
 	whereSql, params := parseQuery(qParam)
 
 	var rawJSON string
-	queryStr := "SELECT raw_json FROM cards WHERE 1=1" + whereSql + " ORDER BY RANDOM() LIMIT 1"
+	if whereSql == "" {
+		// Optimization: O(1) random lookup via rowid index to avoid full table scans on ORDER BY RANDOM()
+		var maxRowID int64
+		err := r.db.QueryRowContext(ctx, "SELECT MAX(rowid) FROM cards").Scan(&maxRowID)
+		if err == nil && maxRowID > 0 {
+			randomID := rand.Int63n(maxRowID) + 1
+			err = r.db.QueryRowContext(ctx, "SELECT raw_json FROM cards WHERE rowid >= ? LIMIT 1", randomID).Scan(&rawJSON)
+			if err == nil {
+				return []byte(rawJSON), nil
+			}
+		}
+	}
 
+	queryStr := "SELECT raw_json FROM cards WHERE 1=1" + whereSql + " ORDER BY RANDOM() LIMIT 1"
 	err := r.db.QueryRowContext(ctx, queryStr, params...).Scan(&rawJSON)
 	if err != nil {
 		return nil, err
