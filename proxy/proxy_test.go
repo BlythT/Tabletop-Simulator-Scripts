@@ -134,6 +134,11 @@ func TestParseQuery(t *testing.T) {
 			wantSql:  " AND json_extract(raw_json, '$.color_identity') LIKE ?",
 			wantArgs: []any{"%UW%"},
 		},
+		{
+			query:    "f:modern')-- set:kld",
+			wantSql:  " AND set_code = ?",
+			wantArgs: []any{"kld"},
+		},
 	}
 
 	for _, tt := range tests {

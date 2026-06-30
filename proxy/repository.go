@@ -15,11 +15,33 @@ import (
 )
 
 var (
-	rxColor = regexp.MustCompile(`(?i)^c([=<>]+)(.+)$`)
-	rxCI    = regexp.MustCompile(`(?i)^ci([=<>]+)(.+)$`)
-	rxCMC   = regexp.MustCompile(`(?i)^(cmc|mv)([=<>]+)(.+)$`)
-	rxPower = regexp.MustCompile(`(?i)^(pow|power)([=<>]+)(.+)$`)
-	rxTough = regexp.MustCompile(`(?i)^(tou|toughness)([=<>]+)(.+)$`)
+	rxFilter = regexp.MustCompile(`(?i)^([a-zA-Z]+)(!=|<=|>=|[:=<>])(.+)$`)
+
+	allowedFormats = map[string]bool{
+		"standard":         true,
+		"future":           true,
+		"historic":         true,
+		"timeless":         true,
+		"gladiator":        true,
+		"pioneer":          true,
+		"modern":           true,
+		"legacy":           true,
+		"pauper":           true,
+		"vintage":          true,
+		"penny":            true,
+		"commander":        true,
+		"oathbreaker":      true,
+		"standardbrawl":    true,
+		"brawl":            true,
+		"competitivebrawl": true,
+		"alchemy":          true,
+		"paupercommander":  true,
+		"duel":             true,
+		"oldschool":        true,
+		"premodern":        true,
+		"predh":            true,
+		"tlr":              true,
+	}
 )
 
 // CardRepository defines the database operations for MTG cards.
@@ -471,34 +493,16 @@ func parseQuery(q string) (whereSql string, params []any) {
 			token = token[1:]
 		}
 
-		// Try to parse comparison-operator tokens (e.g. cmc>=4, pow<3, ci>=uw)
-		// before falling back to the colon-split form.
-		parts := strings.SplitN(token, ":", 2)
-		var compOp string // set when a comparison operator is found instead of ":"
-		if len(parts) != 2 {
-			switch {
-			case rxColor.MatchString(token):
-				m := rxColor.FindStringSubmatch(token)
-				parts, compOp = []string{"c", m[2]}, m[1]
-			case rxCI.MatchString(token):
-				m := rxCI.FindStringSubmatch(token)
-				parts, compOp = []string{"ci", m[2]}, m[1]
-			case rxCMC.MatchString(token):
-				m := rxCMC.FindStringSubmatch(token)
-				parts, compOp = []string{m[1], m[3]}, m[2]
-			case rxPower.MatchString(token):
-				m := rxPower.FindStringSubmatch(token)
-				parts, compOp = []string{m[1], m[3]}, m[2]
-			case rxTough.MatchString(token):
-				m := rxTough.FindStringSubmatch(token)
-				parts, compOp = []string{m[1], m[3]}, m[2]
-			}
+		var key, opStr, val string
+		if m := rxFilter.FindStringSubmatch(token); len(m) > 3 {
+			key = m[1]
+			opStr = m[2]
+			val = m[3]
 		}
 
-		if len(parts) == 2 {
-			key := strings.ToLower(parts[0])
-			val := parts[1]
-			op := comparisonOp(compOp) // defaults to "=" for colon-split tokens
+		if key != "" {
+			key = strings.ToLower(key)
+			op := comparisonOp(opStr)
 
 			switch key {
 			case "s", "set":
@@ -537,16 +541,19 @@ func parseQuery(q string) (whereSql string, params []any) {
 				clauses = append(clauses, "json_extract(raw_json, '$.lang') "+negateOp("=", negate)+" ?")
 				params = append(params, strings.ToLower(val))
 			case "f", "format", "legal":
-					// Legality values are: 'legal', 'not_legal', 'banned', 'restricted'.
-					// Use equality (= 'legal') so SQLite can seek the idx_legal_* expression index.
-					// For negation, match any non-legal value via IN() — still index-seekable per value.
-					formatName := strings.ToLower(val)
-					jsonPath := fmt.Sprintf("'$.legalities.%s'", formatName)
-					if negate {
-						clauses = append(clauses, "json_extract(raw_json, "+jsonPath+") IN ('not_legal', 'banned', 'restricted')")
-					} else {
-						clauses = append(clauses, "json_extract(raw_json, "+jsonPath+") = 'legal'")
-					}
+				// Legality values are: 'legal', 'not_legal', 'banned', 'restricted'.
+				// Use equality (= 'legal') so SQLite can seek the idx_legal_* expression index.
+				// For negation, match any non-legal value via IN() — still index-seekable per value.
+				formatName := strings.ToLower(val)
+				if !allowedFormats[formatName] {
+					continue
+				}
+				jsonPath := fmt.Sprintf("'$.legalities.%s'", formatName)
+				if negate {
+					clauses = append(clauses, "json_extract(raw_json, "+jsonPath+") IN ('not_legal', 'banned', 'restricted')")
+				} else {
+					clauses = append(clauses, "json_extract(raw_json, "+jsonPath+") = 'legal'")
+				}
 			}
 		} else {
 			clean := cleanName(token)
