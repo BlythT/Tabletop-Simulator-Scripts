@@ -91,8 +91,55 @@ func TestParseQuery(t *testing.T) {
 // BenchmarkGetByNamed measures the lookup speed under exact index match vs prefix range match.
 func BenchmarkGetByNamed(b *testing.B) {
 	dbPath := "scryfall.db"
+	isTemp := false
+
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		b.Skipf("Skipping benchmark: database '%s' not found. Run --update first.", dbPath)
+		// Fallback to a generated temporary database for CI and clean environments
+		dbPath = "test_benchmark.db"
+		isTemp = true
+		repo, err := NewSQLiteRepository(dbPath)
+		if err != nil {
+			b.Fatalf("failed to init repo: %v", err)
+		}
+		if err := repo.Init(context.Background()); err != nil {
+			b.Fatalf("failed to init schema: %v", err)
+		}
+
+		// Base JSON template based on a real Scryfall card dump (Forest from Bloomburrow)
+		// We replace the name to make it unique per row
+		baseJSONTmpl := `{"object":"card","id":"0000419b-0bba-4488-8f7a-6194544ce91e","oracle_id":"b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6","multiverse_ids":[668564],"name":"%s","lang":"en","released_at":"2024-08-02","layout":"normal","highres_image":true,"image_status":"highres_scan","image_uris":{"small":"https://cards.scryfall.io/small/front/0/0/0000419b-0bba-4488-8f7a-6194544ce91e.jpg?1721427487","normal":"https://cards.scryfall.io/normal/front/0/0/0000419b-0bba-4488-8f7a-6194544ce91e.jpg?1721427487","large":"https://cards.scryfall.io/large/front/0/0/0000419b-0bba-4488-8f7a-6194544ce91e.jpg?1721427487"},"mana_cost":"","cmc":0.0,"type_line":"Basic Land — Forest","oracle_text":"({T}: Add {G}.)","colors":[],"color_identity":["G"],"keywords":[],"produced_mana":["G"],"legalities":{"standard":"legal","future":"legal","historic":"legal"},"games":["paper","mtgo","arena"],"reserved":false,"foil":true,"nonfoil":true,"finishes":["nonfoil","foil"],"oversized":false,"promo":false,"reprint":true,"variation":false,"set_id":"a2f58272-bba6-439d-871e-7a46686ac018","set":"blb","set_name":"Bloomburrow","set_type":"expansion","collector_number":"280","digital":false,"rarity":"common","border_color":"black","frame":"2015","full_art":true,"textless":false,"booster":true,"story_spotlight":false}`
+
+		// Generate 10,000 dummy cards for a reasonable index size
+		dummyCards := make([]IngestionCard, 10000)
+		for i := 0; i < 9999; i++ {
+			name := fmt.Sprintf("%c Card %d", 'A'+rune(rand.Intn(26)), i)
+			dummyCards[i] = IngestionCard{
+				ID:              fmt.Sprintf("id-%d", i),
+				Name:            name,
+				Set:             "TST",
+				CollectorNumber: fmt.Sprintf("%d", i),
+				Lang:            "en",
+				RawJSON:         []byte(fmt.Sprintf(baseJSONTmpl, name)),
+			}
+		}
+		// Add the target card we will search for
+		dummyCards[9999] = IngestionCard{
+			ID:              "id-bolt",
+			Name:            "Lightning Bolt",
+			Set:             "TST",
+			CollectorNumber: "9999",
+			Lang:            "en",
+			RawJSON:         []byte(fmt.Sprintf(baseJSONTmpl, "Lightning Bolt")),
+		}
+
+		if err := repo.SaveBatch(context.Background(), dummyCards); err != nil {
+			b.Fatalf("batch save failed: %v", err)
+		}
+		repo.Close()
+	}
+
+	if isTemp {
+		defer os.Remove(dbPath)
 	}
 
 	repo, err := NewSQLiteRepository(dbPath)
@@ -139,16 +186,19 @@ func BenchmarkSaveBatchSizes(b *testing.B) {
 		b.Fatalf("failed to init schema: %v", err)
 	}
 
+	baseJSONTmpl := `{"object":"card","id":"0000419b-0bba-4488-8f7a-6194544ce91e","oracle_id":"b34bb2dc-c1af-4d77-b0b3-a0fb342a5fc6","multiverse_ids":[668564],"name":"%s","lang":"en","released_at":"2024-08-02","layout":"normal","highres_image":true,"image_status":"highres_scan","image_uris":{"small":"https://cards.scryfall.io/small/front/0/0/0000419b-0bba-4488-8f7a-6194544ce91e.jpg?1721427487","normal":"https://cards.scryfall.io/normal/front/0/0/0000419b-0bba-4488-8f7a-6194544ce91e.jpg?1721427487","large":"https://cards.scryfall.io/large/front/0/0/0000419b-0bba-4488-8f7a-6194544ce91e.jpg?1721427487"},"mana_cost":"","cmc":0.0,"type_line":"Basic Land — Forest","oracle_text":"({T}: Add {G}.)","colors":[],"color_identity":["G"],"keywords":[],"produced_mana":["G"],"legalities":{"standard":"legal","future":"legal","historic":"legal"},"games":["paper","mtgo","arena"],"reserved":false,"foil":true,"nonfoil":true,"finishes":["nonfoil","foil"],"oversized":false,"promo":false,"reprint":true,"variation":false,"set_id":"a2f58272-bba6-439d-871e-7a46686ac018","set":"blb","set_name":"Bloomburrow","set_type":"expansion","collector_number":"280","digital":false,"rarity":"common","border_color":"black","frame":"2015","full_art":true,"textless":false,"booster":true,"story_spotlight":false}`
+
 	// Generate 5000 dummy cards
 	dummyCards := make([]IngestionCard, 5000)
 	for i := 0; i < 5000; i++ {
+		name := fmt.Sprintf("%c Card %d", 'A'+rune(rand.Intn(26)), i)
 		dummyCards[i] = IngestionCard{
 			ID:              fmt.Sprintf("id-%d-%d", i, rand.Intn(100000)),
-			Name:            fmt.Sprintf("Card Name %d", i),
+			Name:            name,
 			Set:             "TST",
 			CollectorNumber: fmt.Sprintf("%d", i),
 			Lang:            "en",
-			RawJSON:         []byte(`{"object":"card","name":"Card Name","rarity":"common"}`),
+			RawJSON:         []byte(fmt.Sprintf(baseJSONTmpl, name)),
 		}
 	}
 
