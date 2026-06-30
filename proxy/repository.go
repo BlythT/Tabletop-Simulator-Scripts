@@ -150,6 +150,29 @@ func (r *SQLiteRepository) Init(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_cards_power ON cards(json_extract(raw_json, '$.power'));
 		CREATE INDEX IF NOT EXISTS idx_cards_toughness ON cards(json_extract(raw_json, '$.toughness'));
 		CREATE INDEX IF NOT EXISTS idx_cards_artist ON cards(json_extract(raw_json, '$.artist') COLLATE NOCASE);
+		CREATE INDEX IF NOT EXISTS idx_legal_standard        ON cards(json_extract(raw_json, '$.legalities.standard'));
+		CREATE INDEX IF NOT EXISTS idx_legal_future          ON cards(json_extract(raw_json, '$.legalities.future'));
+		CREATE INDEX IF NOT EXISTS idx_legal_historic        ON cards(json_extract(raw_json, '$.legalities.historic'));
+		CREATE INDEX IF NOT EXISTS idx_legal_timeless        ON cards(json_extract(raw_json, '$.legalities.timeless'));
+		CREATE INDEX IF NOT EXISTS idx_legal_gladiator       ON cards(json_extract(raw_json, '$.legalities.gladiator'));
+		CREATE INDEX IF NOT EXISTS idx_legal_pioneer         ON cards(json_extract(raw_json, '$.legalities.pioneer'));
+		CREATE INDEX IF NOT EXISTS idx_legal_modern          ON cards(json_extract(raw_json, '$.legalities.modern'));
+		CREATE INDEX IF NOT EXISTS idx_legal_legacy          ON cards(json_extract(raw_json, '$.legalities.legacy'));
+		CREATE INDEX IF NOT EXISTS idx_legal_pauper          ON cards(json_extract(raw_json, '$.legalities.pauper'));
+		CREATE INDEX IF NOT EXISTS idx_legal_vintage         ON cards(json_extract(raw_json, '$.legalities.vintage'));
+		CREATE INDEX IF NOT EXISTS idx_legal_penny           ON cards(json_extract(raw_json, '$.legalities.penny'));
+		CREATE INDEX IF NOT EXISTS idx_legal_commander       ON cards(json_extract(raw_json, '$.legalities.commander'));
+		CREATE INDEX IF NOT EXISTS idx_legal_oathbreaker     ON cards(json_extract(raw_json, '$.legalities.oathbreaker'));
+		CREATE INDEX IF NOT EXISTS idx_legal_standardbrawl   ON cards(json_extract(raw_json, '$.legalities.standardbrawl'));
+		CREATE INDEX IF NOT EXISTS idx_legal_brawl           ON cards(json_extract(raw_json, '$.legalities.brawl'));
+		CREATE INDEX IF NOT EXISTS idx_legal_competitivebrawl ON cards(json_extract(raw_json, '$.legalities.competitivebrawl'));
+		CREATE INDEX IF NOT EXISTS idx_legal_alchemy         ON cards(json_extract(raw_json, '$.legalities.alchemy'));
+		CREATE INDEX IF NOT EXISTS idx_legal_paupercommander ON cards(json_extract(raw_json, '$.legalities.paupercommander'));
+		CREATE INDEX IF NOT EXISTS idx_legal_duel            ON cards(json_extract(raw_json, '$.legalities.duel'));
+		CREATE INDEX IF NOT EXISTS idx_legal_oldschool       ON cards(json_extract(raw_json, '$.legalities.oldschool'));
+		CREATE INDEX IF NOT EXISTS idx_legal_premodern       ON cards(json_extract(raw_json, '$.legalities.premodern'));
+		CREATE INDEX IF NOT EXISTS idx_legal_predh           ON cards(json_extract(raw_json, '$.legalities.predh'));
+		CREATE INDEX IF NOT EXISTS idx_legal_tlr             ON cards(json_extract(raw_json, '$.legalities.tlr'));
 	`)
 	return err
 }
