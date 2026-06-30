@@ -27,10 +27,11 @@ type CardRepository interface {
 }
 
 type SQLiteRepository struct {
-	dbPath string
-	db     *sql.DB
-	cache  sync.Map
-	mu     sync.RWMutex
+	dbPath  string
+	db      *sql.DB
+	cache   map[string][]byte
+	cacheMu sync.RWMutex
+	mu      sync.RWMutex
 }
 
 func (r *SQLiteRepository) DBPath() string {
@@ -85,6 +86,7 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 	return &SQLiteRepository{
 		dbPath: dbPath,
 		db:     db,
+		cache:  make(map[string][]byte),
 	}, nil
 }
 
@@ -102,6 +104,7 @@ func NewSQLiteRepositoryForIngestion(dbPath string) (*SQLiteRepository, error) {
 	return &SQLiteRepository{
 		dbPath: dbPath,
 		db:     db,
+		cache:  make(map[string][]byte),
 	}, nil
 }
 
@@ -145,6 +148,9 @@ func (r *SQLiteRepository) Init(ctx context.Context) error {
 
 	// Loop over formats dynamically to avoid copy-pasting format indices
 	for fmtName := range allowedFormats {
+		if !isAlphanumeric(fmtName) {
+			continue
+		}
 		stmt := fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_legal_%s ON cards(json_extract(raw_json, '$.legalities.%s'));", fmtName, fmtName)
 		if _, err := r.db.ExecContext(ctx, stmt); err != nil {
 			return err
@@ -186,7 +192,9 @@ func (r *SQLiteRepository) Reload(ctx context.Context, tempDBPath string) error 
 	r.db = db
 
 	// 5. Clear the in-memory lookup cache to prevent stale data
-	r.cache = sync.Map{}
+	r.cacheMu.Lock()
+	r.cache = make(map[string][]byte)
+	r.cacheMu.Unlock()
 
 	return nil
 }
@@ -226,9 +234,19 @@ func (r *SQLiteRepository) SaveBatch(ctx context.Context, cards []IngestionCard)
 	return tx.Commit()
 }
 
+func cacheKey(prefix string, parts ...string) string {
+	var sb strings.Builder
+	sb.WriteString(prefix)
+	for _, p := range parts {
+		sb.WriteByte(':')
+		sb.WriteString(strings.ToLower(p))
+	}
+	return sb.String()
+}
+
 func (r *SQLiteRepository) GetByID(ctx context.Context, id string) ([]byte, error) {
-	cacheKey := "id:" + id
-	if val, ok := r.getFromCache(cacheKey); ok {
+	key := cacheKey("id", id)
+	if val, ok := r.getFromCache(key); ok {
 		return val, nil
 	}
 
@@ -242,7 +260,7 @@ func (r *SQLiteRepository) GetByID(ctx context.Context, id string) ([]byte, erro
 	}
 
 	bytes := []byte(rawJSON)
-	r.setToCache(cacheKey, bytes)
+	r.setToCache(key, bytes)
 	return bytes, nil
 }
 
@@ -252,8 +270,8 @@ func (r *SQLiteRepository) GetByNamed(ctx context.Context, fuzzy string, setCode
 		return nil, sql.ErrNoRows
 	}
 
-	cacheKey := "named:" + clean + ":" + strings.ToLower(setCode)
-	if val, ok := r.getFromCache(cacheKey); ok {
+	key := cacheKey("named", clean, setCode)
+	if val, ok := r.getFromCache(key); ok {
 		return val, nil
 	}
 
@@ -284,16 +302,13 @@ func (r *SQLiteRepository) GetByNamed(ctx context.Context, fuzzy string, setCode
 	}
 
 	bytes := []byte(rawJSON)
-	r.setToCache(cacheKey, bytes)
+	r.setToCache(key, bytes)
 	return bytes, nil
 }
 
 func (r *SQLiteRepository) GetBySetCol(ctx context.Context, setCode, colNum, lang string) ([]byte, error) {
-	setCode = strings.ToLower(setCode)
-	lang = strings.ToLower(lang)
-
-	cacheKey := "setcol:" + setCode + ":" + strings.ToLower(colNum) + ":" + lang
-	if val, ok := r.getFromCache(cacheKey); ok {
+	key := cacheKey("setcol", setCode, colNum, lang)
+	if val, ok := r.getFromCache(key); ok {
 		return val, nil
 	}
 
@@ -302,11 +317,11 @@ func (r *SQLiteRepository) GetBySetCol(ctx context.Context, setCode, colNum, lan
 
 	var rawJSON string
 	// Try specific language first
-	err := r.db.QueryRowContext(ctx, QueryGetBySetColLang, setCode, colNum, lang).Scan(&rawJSON)
+	err := r.db.QueryRowContext(ctx, QueryGetBySetColLang, strings.ToLower(setCode), colNum, strings.ToLower(lang)).Scan(&rawJSON)
 	
 	// Fallback to English or any set/col if missing
 	if err == sql.ErrNoRows {
-		err = r.db.QueryRowContext(ctx, QueryGetBySetCol, setCode, colNum).Scan(&rawJSON)
+		err = r.db.QueryRowContext(ctx, QueryGetBySetCol, strings.ToLower(setCode), colNum).Scan(&rawJSON)
 	}
 
 	if err != nil {
@@ -314,7 +329,7 @@ func (r *SQLiteRepository) GetBySetCol(ctx context.Context, setCode, colNum, lan
 	}
 
 	bytes := []byte(rawJSON)
-	r.setToCache(cacheKey, bytes)
+	r.setToCache(key, bytes)
 	return bytes, nil
 }
 
@@ -379,13 +394,17 @@ func (r *SQLiteRepository) Search(ctx context.Context, qParam, unique string) ([
 }
 
 func (r *SQLiteRepository) getFromCache(key string) ([]byte, bool) {
-	val, ok := r.cache.Load(key)
-	if !ok {
-		return nil, false
-	}
-	return val.([]byte), true
+	r.cacheMu.RLock()
+	defer r.cacheMu.RUnlock()
+	val, ok := r.cache[key]
+	return val, ok
 }
 
 func (r *SQLiteRepository) setToCache(key string, val []byte) {
-	r.cache.Store(key, val)
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	if len(r.cache) > 5000 {
+		r.cache = make(map[string][]byte)
+	}
+	r.cache[key] = val
 }

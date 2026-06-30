@@ -7,18 +7,10 @@ import (
 	"strings"
 )
 
-type fieldOp int
-
-const (
-	opEqual fieldOp = iota
-	opComparable
-	opLike
-)
-
 type fieldConfig struct {
-	col   string
-	op    fieldOp
-	xform func(string) string
+	col       string
+	defaultOp string // "=", "LIKE", or "" (meaning "use comparison operator")
+	xform     func(string) string
 }
 
 var (
@@ -30,30 +22,34 @@ var (
 	wildcardUpper = func(s string) string { return "%" + strings.ToUpper(s) + "%" }
 
 	fields = map[string]fieldConfig{
-		"s":        {col: "set_code", op: opEqual, xform: strings.ToLower},
-		"set":      {col: "set_code", op: opEqual, xform: strings.ToLower},
-		"r":        {col: "json_extract(raw_json, '$.rarity')", op: opEqual, xform: strings.ToLower},
-		"rarity":   {col: "json_extract(raw_json, '$.rarity')", op: opEqual, xform: strings.ToLower},
-		"t":        {col: "json_extract(raw_json, '$.type_line')", op: opLike, xform: wildcardLower},
-		"type":     {col: "json_extract(raw_json, '$.type_line')", op: opLike, xform: wildcardLower},
-		"c":        {col: "json_extract(raw_json, '$.colors')", op: opLike, xform: wildcardUpper},
-		"color":    {col: "json_extract(raw_json, '$.colors')", op: opLike, xform: wildcardUpper},
-		"id":       {col: "json_extract(raw_json, '$.color_identity')", op: opLike, xform: wildcardUpper},
-		"ci":       {col: "json_extract(raw_json, '$.color_identity')", op: opLike, xform: wildcardUpper},
-		"identity": {col: "json_extract(raw_json, '$.color_identity')", op: opLike, xform: wildcardUpper},
-		"cmc":      {col: "CAST(json_extract(raw_json, '$.cmc') AS REAL)", op: opComparable, xform: identity},
-		"mv":       {col: "CAST(json_extract(raw_json, '$.cmc') AS REAL)", op: opComparable, xform: identity},
-		"pow":      {col: "json_extract(raw_json, '$.power')", op: opComparable, xform: identity},
-		"power":    {col: "json_extract(raw_json, '$.power')", op: opComparable, xform: identity},
-		"tou":      {col: "json_extract(raw_json, '$.toughness')", op: opComparable, xform: identity},
-		"toughness": {col: "json_extract(raw_json, '$.toughness')", op: opComparable, xform: identity},
-		"o":        {col: "json_extract(raw_json, '$.oracle_text')", op: opLike, xform: wildcard},
-		"oracle":   {col: "json_extract(raw_json, '$.oracle_text')", op: opLike, xform: wildcard},
-		"a":        {col: "json_extract(raw_json, '$.artist')", op: opLike, xform: wildcard},
-		"art":      {col: "json_extract(raw_json, '$.artist')", op: opLike, xform: wildcard},
-		"artist":   {col: "json_extract(raw_json, '$.artist')", op: opLike, xform: wildcard},
-		"lang":     {col: "json_extract(raw_json, '$.lang')", op: opEqual, xform: strings.ToLower},
-		"l":        {col: "json_extract(raw_json, '$.lang')", op: opEqual, xform: strings.ToLower},
+		"s":        {col: "set_code", defaultOp: "=", xform: strings.ToLower},
+		"set":      {col: "set_code", defaultOp: "=", xform: strings.ToLower},
+		"r":        {col: "json_extract(raw_json, '$.rarity')", defaultOp: "=", xform: strings.ToLower},
+		"rarity":   {col: "json_extract(raw_json, '$.rarity')", defaultOp: "=", xform: strings.ToLower},
+		"t":        {col: "json_extract(raw_json, '$.type_line')", defaultOp: "LIKE", xform: wildcardLower},
+		"type":     {col: "json_extract(raw_json, '$.type_line')", defaultOp: "LIKE", xform: wildcardLower},
+		"c":        {col: "json_extract(raw_json, '$.colors')", defaultOp: "LIKE", xform: wildcardUpper},
+		"color":    {col: "json_extract(raw_json, '$.colors')", defaultOp: "LIKE", xform: wildcardUpper},
+		
+		// Note: Scryfall uses 'id' / 'identity' / 'ci' for color identity (not card UUID).
+		// Card UUID lookup in Tabletop Simulator is executed directly by Scryfall card ID paths.
+		"id":       {col: "json_extract(raw_json, '$.color_identity')", defaultOp: "LIKE", xform: wildcardUpper},
+		"ci":       {col: "json_extract(raw_json, '$.color_identity')", defaultOp: "LIKE", xform: wildcardUpper},
+		"identity": {col: "json_extract(raw_json, '$.color_identity')", defaultOp: "LIKE", xform: wildcardUpper},
+		
+		"cmc":      {col: "CAST(json_extract(raw_json, '$.cmc') AS REAL)", defaultOp: "", xform: identity},
+		"mv":       {col: "CAST(json_extract(raw_json, '$.cmc') AS REAL)", defaultOp: "", xform: identity},
+		"pow":      {col: "json_extract(raw_json, '$.power')", defaultOp: "", xform: identity},
+		"power":    {col: "json_extract(raw_json, '$.power')", defaultOp: "", xform: identity},
+		"tou":      {col: "json_extract(raw_json, '$.toughness')", defaultOp: "", xform: identity},
+		"toughness": {col: "json_extract(raw_json, '$.toughness')", defaultOp: "", xform: identity},
+		"o":        {col: "json_extract(raw_json, '$.oracle_text')", defaultOp: "LIKE", xform: wildcard},
+		"oracle":   {col: "json_extract(raw_json, '$.oracle_text')", defaultOp: "LIKE", xform: wildcard},
+		"a":        {col: "json_extract(raw_json, '$.artist')", defaultOp: "LIKE", xform: wildcard},
+		"art":      {col: "json_extract(raw_json, '$.artist')", defaultOp: "LIKE", xform: wildcard},
+		"artist":   {col: "json_extract(raw_json, '$.artist')", defaultOp: "LIKE", xform: wildcard},
+		"lang":     {col: "json_extract(raw_json, '$.lang')", defaultOp: "=", xform: strings.ToLower},
+		"l":        {col: "json_extract(raw_json, '$.lang')", defaultOp: "=", xform: strings.ToLower},
 	}
 
 	allowedFormats = map[string]bool{
@@ -96,6 +92,15 @@ func cleanName(name string) string {
 	return sb.String()
 }
 
+func isAlphanumeric(s string) bool {
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return s != ""
+}
+
 func negateOp(op string, negate bool) string {
 	if negate {
 		switch op {
@@ -121,22 +126,10 @@ func negateOp(op string, negate bool) string {
 }
 
 func comparisonOp(op string) string {
-	switch op {
-	case ":", "=":
-		return "="
-	case "!=":
-		return "!="
-	case "<":
-		return "<"
-	case ">":
-		return ">"
-	case "<=":
-		return "<="
-	case ">=":
-		return ">="
-	default:
+	if op == ":" {
 		return "="
 	}
+	return op
 }
 
 func parseQuery(q string) (whereSql string, params []any) {
@@ -169,20 +162,15 @@ func parseQuery(q string) (whereSql string, params []any) {
 
 			if conf, ok := fields[key]; ok {
 				transformedVal := conf.xform(val)
-				switch conf.op {
-				case opEqual:
-					clauses = append(clauses, conf.col+" "+negateOp("=", negate)+" ?")
-					params = append(params, transformedVal)
-				case opComparable:
-					clauses = append(clauses, conf.col+" "+negateOp(op, negate)+" ?")
-					params = append(params, transformedVal)
-				case opLike:
-					clauses = append(clauses, conf.col+" "+negateOp("LIKE", negate)+" ?")
-					params = append(params, transformedVal)
+				sqlOp := conf.defaultOp
+				if sqlOp == "" {
+					sqlOp = op
 				}
+				clauses = append(clauses, conf.col+" "+negateOp(sqlOp, negate)+" ?")
+				params = append(params, transformedVal)
 			} else if key == "f" || key == "format" || key == "legal" {
 				formatName := strings.ToLower(val)
-				if allowedFormats[formatName] {
+				if allowedFormats[formatName] && isAlphanumeric(formatName) {
 					jsonPath := fmt.Sprintf("'$.legalities.%s'", formatName)
 					if negate {
 						clauses = append(clauses, "json_extract(raw_json, "+jsonPath+") IN ('not_legal', 'banned', 'restricted')")
