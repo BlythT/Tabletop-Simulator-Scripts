@@ -25,23 +25,48 @@ func TestParseQuery(t *testing.T) {
 	}{
 		{
 			query:    "set:kld r:common",
-			wantSql:  " AND set_code = ? AND raw_json LIKE ?",
-			wantArgs: []any{"kld", `%"rarity":"common"%`},
+			wantSql:  " AND set_code = ? AND json_extract(raw_json, '$.rarity') = ?",
+			wantArgs: []any{"kld", "common"},
 		},
 		{
 			query:    "s:mb1 r:common c:w",
-			wantSql:  " AND set_code = ? AND raw_json LIKE ? AND raw_json LIKE ?",
-			wantArgs: []any{"mb1", `%"rarity":"common"%`, `%"W"%`},
+			wantSql:  " AND set_code = ? AND json_extract(raw_json, '$.rarity') = ? AND json_extract(raw_json, '$.colors') LIKE ?",
+			wantArgs: []any{"mb1", "common", "%W%"},
 		},
 		{
 			query:    "-t:basic s:kld",
-			wantSql:  " AND raw_json NOT LIKE ? AND set_code = ?",
-			wantArgs: []any{`%"type_line":"%basic%"%`, "kld"},
+			wantSql:  " AND json_extract(raw_json, '$.type_line') NOT LIKE ? AND set_code = ?",
+			wantArgs: []any{"%basic%", "kld"},
 		},
 		{
 			query:    "Lightning Bolt",
 			wantSql:  " AND name_clean LIKE ? AND name_clean LIKE ?",
 			wantArgs: []any{"%lightning%", "%bolt%"},
+		},
+		{
+			query:    "-set:kld -r:common",
+			wantSql:  " AND set_code != ? AND json_extract(raw_json, '$.rarity') != ?",
+			wantArgs: []any{"kld", "common"},
+		},
+		{
+			query:    "  SET:KLD   -r:CoMmOn  ",
+			wantSql:  " AND set_code = ? AND json_extract(raw_json, '$.rarity') != ?",
+			wantArgs: []any{"kld", "common"},
+		},
+		{
+			query:    "set:kld+r:common",
+			wantSql:  " AND set_code = ? AND json_extract(raw_json, '$.rarity') = ?",
+			wantArgs: []any{"kld", "common"},
+		},
+		{
+			query:    "   ",
+			wantSql:  "",
+			wantArgs: nil,
+		},
+		{
+			query:    "invalid:tag set:kld",
+			wantSql:  " AND set_code = ?",
+			wantArgs: []any{"kld"},
 		},
 	}
 
@@ -842,4 +867,131 @@ func TestAdminUpdateForbidden(t *testing.T) {
 	}
 }
 
+func TestNoFullTableScans(t *testing.T) {
+	dbFile := "test_explain_no_scan.db"
+	defer os.Remove(dbFile)
 
+	repo, err := NewSQLiteRepository(dbFile)
+	if err != nil {
+		t.Fatalf("failed to create repo: %v", err)
+	}
+	defer repo.Close()
+
+	ctx := context.Background()
+	if err := repo.Init(ctx); err != nil {
+		t.Fatalf("failed to init schema: %v", err)
+	}
+
+	queries := []struct {
+		name      string
+		query     string
+		args      []any
+		allowScan bool
+	}{
+		{
+			name:  "GetByID",
+			query: QueryGetByID,
+			args:  []any{"test-id"},
+		},
+		{
+			name:  "GetByNamed (Exact)",
+			query: QueryGetByNamedExact,
+			args:  []any{"lightningbolt"},
+		},
+		{
+			name:  "GetByNamed (Exact + Set)",
+			query: QueryGetByNamedExactSet,
+			args:  []any{"lightningbolt", "eld"},
+		},
+		{
+			name:  "GetByNamed (Prefix)",
+			query: QueryGetByNamedPrefix,
+			args:  []any{"lightning%"},
+		},
+		{
+			name:  "GetByNamed (Prefix + Set)",
+			query: QueryGetByNamedPrefixSet,
+			args:  []any{"lightning%", "eld"},
+		},
+		{
+			name:  "GetBySetCol (Exact)",
+			query: QueryGetBySetColLang,
+			args:  []any{"eld", "123", "en"},
+		},
+		{
+			name:  "GetBySetCol (Fallback)",
+			query: QueryGetBySetCol,
+			args:  []any{"eld", "123"},
+		},
+		{
+			name:  "GetRandom (No Filters)",
+			query: QueryGetRandomNoFilters,
+			args:  nil,
+		},
+		{
+			name:  "Search (Set Filter)",
+			query: QueryBaseSelect + " AND set_code = ? ORDER BY LENGTH(name) ASC LIMIT 100",
+			args:  []any{"eld"},
+		},
+		{
+			name:  "Search (Rarity Filter)",
+			query: QueryBaseSelect + " AND json_extract(raw_json, '$.rarity') = ? ORDER BY LENGTH(name) ASC LIMIT 100",
+			args:  []any{"rare"},
+		},
+		{
+			name:      "Search (Name Filter Infix)",
+			query:     QueryBaseSelect + " AND name_clean LIKE ? ORDER BY LENGTH(name) ASC LIMIT 100",
+			args:      []any{"%lightning%"},
+			allowScan: true, // Infix LIKE cannot use B-Tree index, expected to scan
+		},
+		{
+			name:      "Search (Name Filter Prefix)",
+			query:     QueryBaseSelect + " AND name_clean LIKE ? ORDER BY LENGTH(name) ASC LIMIT 100",
+			args:      []any{"lightning%"},
+			allowScan: false, // Must use index
+		},
+		{
+			name:      "Search (Name Filter Negated Infix)",
+			query:     QueryBaseSelect + " AND name_clean NOT LIKE ? ORDER BY LENGTH(name) ASC LIMIT 100",
+			args:      []any{"%lightning%"},
+			allowScan: true, // Negated infix LIKE expected to scan
+		},
+		{
+			name:      "Search (Name Filter Negated Prefix)",
+			query:     QueryBaseSelect + " AND name_clean NOT LIKE ? ORDER BY LENGTH(name) ASC LIMIT 100",
+			args:      []any{"lightning%"},
+			allowScan: true, // Negated prefix LIKE cannot be optimized via B-tree range check, expected to scan
+		},
+	}
+
+	for _, tc := range queries {
+		t.Run(tc.name, func(t *testing.T) {
+			explainQuery := "EXPLAIN QUERY PLAN " + tc.query
+			rows, err := repo.db.QueryContext(ctx, explainQuery, tc.args...)
+			if err != nil {
+				t.Fatalf("failed to explain query: %v", err)
+			}
+			defer rows.Close()
+
+			var details []string
+			for rows.Next() {
+				var id, parent, notused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+					t.Fatalf("failed to scan explain result: %v", err)
+				}
+				details = append(details, detail)
+
+				// Only fail if it's scanning the cards table (O(N) scan) and we don't allow it.
+				// SQLite in-memory / virtual scans like "SCAN CONSTANT ROW" are O(1) and acceptable.
+				if !tc.allowScan && strings.Contains(detail, "SCAN ") && strings.Contains(detail, "cards") {
+					t.Errorf("FAIL: Full table scan detected!\nPlan detail: %s\nQuery: %s", detail, tc.query)
+				}
+			}
+			
+			if t.Failed() {
+				t.Logf("Full query plan for %s:\n\t%s", tc.name, strings.Join(details, "\n\t"))
+			}
+		})
+	}
+}

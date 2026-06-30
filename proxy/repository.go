@@ -15,8 +15,6 @@ import (
 )
 
 var (
-	rxSet   = regexp.MustCompile(`(?i)set:(\w+)`)
-	rxType  = regexp.MustCompile(`(?i)t:(\w+)`)
 	rxColor = regexp.MustCompile(`(?i)^c([=<>]+)(.+)$`)
 )
 
@@ -45,10 +43,67 @@ func (r *SQLiteRepository) DBPath() string {
 	return r.dbPath
 }
 
+// applyReadPragmas configures the connection for production read workloads.
+func applyReadPragmas(db *sql.DB) error {
+	pragmas := []string{
+		"PRAGMA journal_mode = WAL;",
+		"PRAGMA synchronous = NORMAL;",
+		"PRAGMA cache_size = -64000;",
+		"PRAGMA mmap_size = 1073741824;",
+		"PRAGMA temp_store = MEMORY;",
+		"PRAGMA busy_timeout = 5000;",
+	}
+	for _, p := range pragmas {
+		if _, err := db.Exec(p); err != nil {
+			return fmt.Errorf("failed to apply pragma %q: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// applyFastWritePragmas configures the connection for bulk write/ingestion.
+func applyFastWritePragmas(db *sql.DB) error {
+	fastPragmas := []string{
+		"PRAGMA journal_mode = OFF;",
+		"PRAGMA synchronous = OFF;",
+		"PRAGMA locking_mode = EXCLUSIVE;",
+		"PRAGMA cache_size = -128000;",
+	}
+	for _, p := range fastPragmas {
+		if _, err := db.Exec(p); err != nil {
+			return fmt.Errorf("failed to apply fast ingestion pragma %q: %w", p, err)
+		}
+	}
+	return nil
+}
+
 func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	if err := applyReadPragmas(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	return &SQLiteRepository{
+		dbPath: dbPath,
+		db:     db,
+		cache:  make(map[string][]byte),
+	}, nil
+}
+
+func NewSQLiteRepositoryForIngestion(dbPath string) (*SQLiteRepository, error) {
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database for ingestion: %w", err)
+	}
+
+	if err := applyFastWritePragmas(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 
 	return &SQLiteRepository{
@@ -72,14 +127,19 @@ func (r *SQLiteRepository) Init(ctx context.Context) error {
 		CREATE TABLE IF NOT EXISTS cards (
 			id TEXT PRIMARY KEY,
 			name TEXT,
-			name_clean TEXT,
+			name_clean TEXT COLLATE NOCASE,
 			set_code TEXT,
 			collector_number TEXT,
 			lang TEXT,
 			raw_json TEXT
 		);
+		DROP INDEX IF EXISTS idx_cards_name_clean_nocase;
+		DROP INDEX IF EXISTS idx_cards_set_name_nocase;
 		CREATE INDEX IF NOT EXISTS idx_cards_name_clean ON cards(name_clean);
+		CREATE INDEX IF NOT EXISTS idx_cards_set_name ON cards(set_code, name_clean);
 		CREATE INDEX IF NOT EXISTS idx_cards_set_col ON cards(set_code, collector_number);
+		CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(json_extract(raw_json, '$.rarity'));
+		CREATE INDEX IF NOT EXISTS idx_cards_type_line ON cards(json_extract(raw_json, '$.type_line') COLLATE NOCASE);
 	`)
 	return err
 }
@@ -107,6 +167,11 @@ func (r *SQLiteRepository) Reload(ctx context.Context, tempDBPath string) error 
 	db, err := sql.Open("sqlite", r.dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to re-open database: %w", err)
+	}
+
+	if err := applyReadPragmas(db); err != nil {
+		db.Close()
+		return fmt.Errorf("failed to re-apply pragmas after reload: %w", err)
 	}
 	r.db = db
 
@@ -161,7 +226,7 @@ func (r *SQLiteRepository) GetByID(ctx context.Context, id string) ([]byte, erro
 	}
 
 	var rawJSON string
-	err := r.db.QueryRowContext(ctx, "SELECT raw_json FROM cards WHERE id = ? LIMIT 1", id).Scan(&rawJSON)
+	err := r.db.QueryRowContext(ctx, QueryGetByID, id).Scan(&rawJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -190,17 +255,17 @@ func (r *SQLiteRepository) GetByNamed(ctx context.Context, fuzzy string, setCode
 
 	// 1. Try exact clean name match
 	if setCode != "" {
-		err = r.db.QueryRowContext(ctx, "SELECT raw_json FROM cards WHERE name_clean = ? AND set_code = ? LIMIT 1", clean, strings.ToLower(setCode)).Scan(&rawJSON)
+		err = r.db.QueryRowContext(ctx, QueryGetByNamedExactSet, clean, strings.ToLower(setCode)).Scan(&rawJSON)
 	} else {
-		err = r.db.QueryRowContext(ctx, "SELECT raw_json FROM cards WHERE name_clean = ? LIMIT 1", clean).Scan(&rawJSON)
+		err = r.db.QueryRowContext(ctx, QueryGetByNamedExact, clean).Scan(&rawJSON)
 	}
 
 	// 2. Try prefix match
 	if err == sql.ErrNoRows {
 		if setCode != "" {
-			err = r.db.QueryRowContext(ctx, "SELECT raw_json FROM cards WHERE name_clean LIKE ? AND set_code = ? LIMIT 1", clean+"%", strings.ToLower(setCode)).Scan(&rawJSON)
+			err = r.db.QueryRowContext(ctx, QueryGetByNamedPrefixSet, clean+"%", strings.ToLower(setCode)).Scan(&rawJSON)
 		} else {
-			err = r.db.QueryRowContext(ctx, "SELECT raw_json FROM cards WHERE name_clean LIKE ? LIMIT 1", clean+"%").Scan(&rawJSON)
+			err = r.db.QueryRowContext(ctx, QueryGetByNamedPrefix, clean+"%").Scan(&rawJSON)
 		}
 	}
 
@@ -227,11 +292,11 @@ func (r *SQLiteRepository) GetBySetCol(ctx context.Context, setCode, colNum, lan
 
 	var rawJSON string
 	// Try specific language first
-	err := r.db.QueryRowContext(ctx, "SELECT raw_json FROM cards WHERE set_code = ? AND collector_number = ? AND lang = ? LIMIT 1", setCode, colNum, lang).Scan(&rawJSON)
+	err := r.db.QueryRowContext(ctx, QueryGetBySetColLang, setCode, colNum, lang).Scan(&rawJSON)
 	
 	// Fallback to English or any set/col if missing
 	if err == sql.ErrNoRows {
-		err = r.db.QueryRowContext(ctx, "SELECT raw_json FROM cards WHERE set_code = ? AND collector_number = ? LIMIT 1", setCode, colNum).Scan(&rawJSON)
+		err = r.db.QueryRowContext(ctx, QueryGetBySetCol, setCode, colNum).Scan(&rawJSON)
 	}
 
 	if err != nil {
@@ -252,19 +317,13 @@ func (r *SQLiteRepository) GetRandom(ctx context.Context, qParam string) ([]byte
 	var rawJSON string
 	if whereSql == "" {
 		// Optimization: O(1) single-query random lookup via materialized subquery
-		queryStr := `
-			SELECT raw_json 
-			FROM cards, 
-			     (SELECT (ABS(RANDOM()) % (SELECT COALESCE(MAX(rowid), 1) FROM cards)) + 1 AS rand_id) 
-			WHERE rowid >= rand_id 
-			LIMIT 1`
-		err := r.db.QueryRowContext(ctx, queryStr).Scan(&rawJSON)
+		err := r.db.QueryRowContext(ctx, QueryGetRandomNoFilters).Scan(&rawJSON)
 		if err == nil {
 			return []byte(rawJSON), nil
 		}
 	}
 
-	queryStr := "SELECT raw_json FROM cards WHERE 1=1" + whereSql + " ORDER BY RANDOM() LIMIT 1"
+	queryStr := QueryBaseSelect + whereSql + " ORDER BY RANDOM() LIMIT 1"
 	err := r.db.QueryRowContext(ctx, queryStr, params...).Scan(&rawJSON)
 	if err != nil {
 		return nil, err
@@ -273,43 +332,11 @@ func (r *SQLiteRepository) GetRandom(ctx context.Context, qParam string) ([]byte
 }
 
 func (r *SQLiteRepository) Search(ctx context.Context, qParam, unique string) ([]byte, error) {
-	// Parse basic filters from Scryfall q parameter (e.g. set:xxx, t:xxx)
-	var setCode, typeLine string
-	
-	// Extract set:xxx
-	if m := rxSet.FindStringSubmatch(qParam); len(m) > 1 {
-		setCode = strings.ToLower(m[1])
-		qParam = strings.ReplaceAll(qParam, m[0], "")
-	}
-	
-	// Extract t:xxx
-	if m := rxType.FindStringSubmatch(qParam); len(m) > 1 {
-		typeLine = strings.ToLower(m[1])
-		qParam = strings.ReplaceAll(qParam, m[0], "")
-	}
-
-	searchName := cleanName(qParam)
-
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	sqlQuery := "SELECT raw_json FROM cards WHERE 1=1"
-	var params []any
-
-	if setCode != "" {
-		sqlQuery += " AND set_code = ?"
-		params = append(params, setCode)
-	}
-	if typeLine != "" {
-		sqlQuery += " AND raw_json LIKE ?"
-		params = append(params, `%"type_line":"%`+typeLine+`%"`)
-	}
-	if searchName != "" {
-		sqlQuery += " AND name_clean LIKE ?"
-		params = append(params, "%"+searchName+"%")
-	}
-
-	sqlQuery += " ORDER BY LENGTH(name) ASC LIMIT 100"
+	whereSql, params := parseQuery(qParam)
+	sqlQuery := QueryBaseSelect + whereSql + " ORDER BY LENGTH(name) ASC LIMIT 100"
 
 	rows, err := r.db.QueryContext(ctx, sqlQuery, params...)
 	if err != nil {
@@ -363,6 +390,16 @@ func cleanName(name string) string {
 	return sb.String()
 }
 
+func negateOp(op string, negate bool) string {
+	if negate {
+		if op == "=" {
+			return "!="
+		}
+		return "NOT " + op
+	}
+	return op
+}
+
 func parseQuery(q string) (whereSql string, params []any) {
 	uDec, err := url.QueryUnescape(q)
 	if err == nil {
@@ -393,42 +430,22 @@ func parseQuery(q string) (whereSql string, params []any) {
 
 			switch key {
 			case "s", "set":
-				if negate {
-					clauses = append(clauses, "set_code != ?")
-				} else {
-					clauses = append(clauses, "set_code = ?")
-				}
+				clauses = append(clauses, "set_code "+negateOp("=", negate)+" ?")
 				params = append(params, strings.ToLower(val))
 			case "r", "rarity":
-				if negate {
-					clauses = append(clauses, "raw_json NOT LIKE ?")
-				} else {
-					clauses = append(clauses, "raw_json LIKE ?")
-				}
-				params = append(params, fmt.Sprintf(`%%"rarity":"%s"%%`, strings.ToLower(val)))
+				clauses = append(clauses, "json_extract(raw_json, '$.rarity') "+negateOp("=", negate)+" ?")
+				params = append(params, strings.ToLower(val))
 			case "t", "type":
-				if negate {
-					clauses = append(clauses, "raw_json NOT LIKE ?")
-				} else {
-					clauses = append(clauses, "raw_json LIKE ?")
-				}
-				params = append(params, fmt.Sprintf(`%%"type_line":"%%%s%%"%%`, strings.ToLower(val)))
+				clauses = append(clauses, "json_extract(raw_json, '$.type_line') "+negateOp("LIKE", negate)+" ?")
+				params = append(params, "%"+strings.ToLower(val)+"%")
 			case "id", "c", "color":
-				if negate {
-					clauses = append(clauses, "raw_json NOT LIKE ?")
-				} else {
-					clauses = append(clauses, "raw_json LIKE ?")
-				}
-				params = append(params, fmt.Sprintf(`%%"%s"%%`, strings.ToUpper(val)))
+				clauses = append(clauses, "json_extract(raw_json, '$.colors') "+negateOp("LIKE", negate)+" ?")
+				params = append(params, "%"+strings.ToUpper(val)+"%")
 			}
 		} else {
 			clean := cleanName(token)
 			if clean != "" {
-				if negate {
-					clauses = append(clauses, "name_clean NOT LIKE ?")
-				} else {
-					clauses = append(clauses, "name_clean LIKE ?")
-				}
+				clauses = append(clauses, "name_clean "+negateOp("LIKE", negate)+" ?")
 				params = append(params, "%"+clean+"%")
 			}
 		}

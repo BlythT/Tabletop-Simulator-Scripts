@@ -66,7 +66,7 @@ func UpdateDatabase(ctx context.Context, tempDBPath string) error {
 	_ = os.Remove(tempDBPath)
 
 	fmt.Printf("Initializing temporary database at %s...\n", tempDBPath)
-	repo, err := NewSQLiteRepository(tempDBPath)
+	repo, err := NewSQLiteRepositoryForIngestion(tempDBPath)
 	if err != nil {
 		return err
 	}
