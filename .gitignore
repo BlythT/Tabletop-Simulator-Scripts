@@ -52,3 +52,12 @@ Magic/DynCustom.lua
 *.txt
 MysticVale/DefinitiveScript.lua
 Tools/CardDynamic.lua
+
+# SQLite and Docker Data directories
+data/
+proxy/*.db
+proxy/*.db.tmp
+test_fail.db
+test_update.db
+test_admin_update.db
+test_admin_update.db.tmp

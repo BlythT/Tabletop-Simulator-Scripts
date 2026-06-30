@@ -31,6 +31,7 @@ type CardRepository interface {
 	Search(ctx context.Context, qParam, unique string) ([]byte, error)
 	Close() error
 	Reload(ctx context.Context, tempDBPath string) error
+	DBPath() string
 }
 
 type SQLiteRepository struct {
@@ -38,6 +39,10 @@ type SQLiteRepository struct {
 	db     *sql.DB
 	cache  map[string][]byte
 	mu     sync.RWMutex
+}
+
+func (r *SQLiteRepository) DBPath() string {
+	return r.dbPath
 }
 
 func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {

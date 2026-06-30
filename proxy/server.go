@@ -321,7 +321,7 @@ func (s *Server) handleAdminUpdate(w http.ResponseWriter, r *http.Request) {
 	// Trigger update in a background goroutine
 	go func() {
 		ctx := context.Background()
-		tempDBPath := "scryfall.db.tmp"
+		tempDBPath := s.repo.DBPath() + ".tmp"
 
 		err := UpdateDatabase(ctx, tempDBPath)
 		s.updateMutex.Lock()

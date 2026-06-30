@@ -205,6 +205,10 @@ func (m *MockRepository) Close() error {
 	return nil
 }
 
+func (m *MockRepository) DBPath() string {
+	return "scryfall.db"
+}
+
 func TestServerEndpoints(t *testing.T) {
 	mockRepo := &MockRepository{}
 	server := NewServer(mockRepo, 8000)
