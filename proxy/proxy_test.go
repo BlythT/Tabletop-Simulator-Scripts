@@ -121,7 +121,7 @@ func TestParseQuery(t *testing.T) {
 		},
 		{
 			query:    "-f:commander",
-			wantSql:  " AND json_extract(raw_json, '$.legalities.commander') != 'legal'",
+			wantSql:  " AND json_extract(raw_json, '$.legalities.commander') IN ('not_legal', 'banned', 'restricted')",
 			wantArgs: nil,
 		},
 		{

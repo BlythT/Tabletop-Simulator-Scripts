@@ -537,15 +537,16 @@ func parseQuery(q string) (whereSql string, params []any) {
 				clauses = append(clauses, "json_extract(raw_json, '$.lang') "+negateOp("=", negate)+" ?")
 				params = append(params, strings.ToLower(val))
 			case "f", "format", "legal":
-				// Legality is stored as a nested JSON object: {"legalities": {"modern": "legal", ...}}
-				// json_extract path must be: '$.legalities.modern'
-				formatName := strings.ToLower(val)
-				jsonPath := fmt.Sprintf("'$.legalities.%s'", formatName)
-				if negate {
-					clauses = append(clauses, "json_extract(raw_json, "+jsonPath+") != 'legal'")
-				} else {
-					clauses = append(clauses, "json_extract(raw_json, "+jsonPath+") = 'legal'")
-				}
+					// Legality values are: 'legal', 'not_legal', 'banned', 'restricted'.
+					// Use equality (= 'legal') so SQLite can seek the idx_legal_* expression index.
+					// For negation, match any non-legal value via IN() — still index-seekable per value.
+					formatName := strings.ToLower(val)
+					jsonPath := fmt.Sprintf("'$.legalities.%s'", formatName)
+					if negate {
+						clauses = append(clauses, "json_extract(raw_json, "+jsonPath+") IN ('not_legal', 'banned', 'restricted')")
+					} else {
+						clauses = append(clauses, "json_extract(raw_json, "+jsonPath+") = 'legal'")
+					}
 			}
 		} else {
 			clean := cleanName(token)
