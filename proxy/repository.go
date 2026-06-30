@@ -16,6 +16,10 @@ import (
 
 var (
 	rxColor = regexp.MustCompile(`(?i)^c([=<>]+)(.+)$`)
+	rxCI    = regexp.MustCompile(`(?i)^ci([=<>]+)(.+)$`)
+	rxCMC   = regexp.MustCompile(`(?i)^(cmc|mv)([=<>]+)(.+)$`)
+	rxPower = regexp.MustCompile(`(?i)^(pow|power)([=<>]+)(.+)$`)
+	rxTough = regexp.MustCompile(`(?i)^(tou|toughness)([=<>]+)(.+)$`)
 )
 
 // CardRepository defines the database operations for MTG cards.
@@ -140,6 +144,12 @@ func (r *SQLiteRepository) Init(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_cards_set_col ON cards(set_code, collector_number);
 		CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(json_extract(raw_json, '$.rarity'));
 		CREATE INDEX IF NOT EXISTS idx_cards_type_line ON cards(json_extract(raw_json, '$.type_line') COLLATE NOCASE);
+		CREATE INDEX IF NOT EXISTS idx_cards_cmc ON cards(CAST(json_extract(raw_json, '$.cmc') AS REAL));
+		CREATE INDEX IF NOT EXISTS idx_cards_lang ON cards(json_extract(raw_json, '$.lang'));
+		CREATE INDEX IF NOT EXISTS idx_cards_color_identity ON cards(json_extract(raw_json, '$.color_identity'));
+		CREATE INDEX IF NOT EXISTS idx_cards_power ON cards(json_extract(raw_json, '$.power'));
+		CREATE INDEX IF NOT EXISTS idx_cards_toughness ON cards(json_extract(raw_json, '$.toughness'));
+		CREATE INDEX IF NOT EXISTS idx_cards_artist ON cards(json_extract(raw_json, '$.artist') COLLATE NOCASE);
 	`)
 	return err
 }
@@ -400,6 +410,27 @@ func negateOp(op string, negate bool) string {
 	return op
 }
 
+// comparisonOp converts a Scryfall comparison operator string into a valid SQL comparison operator.
+// Scryfall supports =, !=, <, >, <=, >= as well as the alias ":", which means "=" for exact matches.
+func comparisonOp(op string) string {
+	switch op {
+	case ":", "=":
+		return "="
+	case "!=":
+		return "!="
+	case "<":
+		return "<"
+	case ">":
+		return ">"
+	case "<=":
+		return "<="
+	case ">=":
+		return ">="
+	default:
+		return "="
+	}
+}
+
 func parseQuery(q string) (whereSql string, params []any) {
 	uDec, err := url.QueryUnescape(q)
 	if err == nil {
@@ -417,16 +448,34 @@ func parseQuery(q string) (whereSql string, params []any) {
 			token = token[1:]
 		}
 
+		// Try to parse comparison-operator tokens (e.g. cmc>=4, pow<3, ci>=uw)
+		// before falling back to the colon-split form.
 		parts := strings.SplitN(token, ":", 2)
+		var compOp string // set when a comparison operator is found instead of ":"
 		if len(parts) != 2 {
-			if m := rxColor.FindStringSubmatch(token); len(m) > 2 {
-				parts = []string{"c", m[2]}
+			switch {
+			case rxColor.MatchString(token):
+				m := rxColor.FindStringSubmatch(token)
+				parts, compOp = []string{"c", m[2]}, m[1]
+			case rxCI.MatchString(token):
+				m := rxCI.FindStringSubmatch(token)
+				parts, compOp = []string{"ci", m[2]}, m[1]
+			case rxCMC.MatchString(token):
+				m := rxCMC.FindStringSubmatch(token)
+				parts, compOp = []string{m[1], m[3]}, m[2]
+			case rxPower.MatchString(token):
+				m := rxPower.FindStringSubmatch(token)
+				parts, compOp = []string{m[1], m[3]}, m[2]
+			case rxTough.MatchString(token):
+				m := rxTough.FindStringSubmatch(token)
+				parts, compOp = []string{m[1], m[3]}, m[2]
 			}
 		}
 
 		if len(parts) == 2 {
 			key := strings.ToLower(parts[0])
 			val := parts[1]
+			op := comparisonOp(compOp) // defaults to "=" for colon-split tokens
 
 			switch key {
 			case "s", "set":
@@ -438,9 +487,42 @@ func parseQuery(q string) (whereSql string, params []any) {
 			case "t", "type":
 				clauses = append(clauses, "json_extract(raw_json, '$.type_line') "+negateOp("LIKE", negate)+" ?")
 				params = append(params, "%"+strings.ToLower(val)+"%")
-			case "id", "c", "color":
+			case "c", "color":
 				clauses = append(clauses, "json_extract(raw_json, '$.colors') "+negateOp("LIKE", negate)+" ?")
 				params = append(params, "%"+strings.ToUpper(val)+"%")
+			case "id", "ci", "identity":
+				clauses = append(clauses, "json_extract(raw_json, '$.color_identity') "+negateOp("LIKE", negate)+" ?")
+				params = append(params, "%"+strings.ToUpper(val)+"%")
+			case "cmc", "mv":
+				clauses = append(clauses, "CAST(json_extract(raw_json, '$.cmc') AS REAL) "+negateOp(op, negate)+" ?")
+				params = append(params, val)
+			case "pow", "power":
+				clauses = append(clauses, "json_extract(raw_json, '$.power') "+negateOp(op, negate)+" ?")
+				params = append(params, val)
+			case "tou", "toughness":
+				clauses = append(clauses, "json_extract(raw_json, '$.toughness') "+negateOp(op, negate)+" ?")
+				params = append(params, val)
+			case "o", "oracle":
+				// No B-Tree index — full scan is expected and accepted
+				clauses = append(clauses, "json_extract(raw_json, '$.oracle_text') "+negateOp("LIKE", negate)+" ?")
+				params = append(params, "%"+val+"%")
+			case "a", "art", "artist":
+				// No B-Tree index for infix wildcard — artist index only helps prefix lookups
+				clauses = append(clauses, "json_extract(raw_json, '$.artist') "+negateOp("LIKE", negate)+" ?")
+				params = append(params, "%"+val+"%")
+			case "lang", "l":
+				clauses = append(clauses, "json_extract(raw_json, '$.lang') "+negateOp("=", negate)+" ?")
+				params = append(params, strings.ToLower(val))
+			case "f", "format", "legal":
+				// Legality is stored as a nested JSON object: {"legalities": {"modern": "legal", ...}}
+				// json_extract path must be: '$.legalities.modern'
+				formatName := strings.ToLower(val)
+				jsonPath := fmt.Sprintf("'$.legalities.%s'", formatName)
+				if negate {
+					clauses = append(clauses, "json_extract(raw_json, "+jsonPath+") != 'legal'")
+				} else {
+					clauses = append(clauses, "json_extract(raw_json, "+jsonPath+") = 'legal'")
+				}
 			}
 		} else {
 			clean := cleanName(token)

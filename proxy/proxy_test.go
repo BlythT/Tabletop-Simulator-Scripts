@@ -68,6 +68,72 @@ func TestParseQuery(t *testing.T) {
 			wantSql:  " AND set_code = ?",
 			wantArgs: []any{"kld"},
 		},
+		// New filter tests
+		{
+			query:    "cmc:4",
+			wantSql:  " AND CAST(json_extract(raw_json, '$.cmc') AS REAL) = ?",
+			wantArgs: []any{"4"},
+		},
+		{
+			query:    "mv>=3",
+			wantSql:  " AND CAST(json_extract(raw_json, '$.cmc') AS REAL) >= ?",
+			wantArgs: []any{"3"},
+		},
+		{
+			query:    "cmc<2",
+			wantSql:  " AND CAST(json_extract(raw_json, '$.cmc') AS REAL) < ?",
+			wantArgs: []any{"2"},
+		},
+		{
+			query:    "pow>=4",
+			wantSql:  " AND json_extract(raw_json, '$.power') >= ?",
+			wantArgs: []any{"4"},
+		},
+		{
+			query:    "tou:3",
+			wantSql:  " AND json_extract(raw_json, '$.toughness') = ?",
+			wantArgs: []any{"3"},
+		},
+		{
+			query:    "o:flying",
+			wantSql:  " AND json_extract(raw_json, '$.oracle_text') LIKE ?",
+			wantArgs: []any{"%flying%"},
+		},
+		{
+			query:    "-o:flying",
+			wantSql:  " AND json_extract(raw_json, '$.oracle_text') NOT LIKE ?",
+			wantArgs: []any{"%flying%"},
+		},
+		{
+			query:    "a:hovey",
+			wantSql:  " AND json_extract(raw_json, '$.artist') LIKE ?",
+			wantArgs: []any{"%hovey%"},
+		},
+		{
+			query:    "lang:ja",
+			wantSql:  " AND json_extract(raw_json, '$.lang') = ?",
+			wantArgs: []any{"ja"},
+		},
+		{
+			query:    "f:modern",
+			wantSql:  " AND json_extract(raw_json, '$.legalities.modern') = 'legal'",
+			wantArgs: nil,
+		},
+		{
+			query:    "-f:commander",
+			wantSql:  " AND json_extract(raw_json, '$.legalities.commander') != 'legal'",
+			wantArgs: nil,
+		},
+		{
+			query:    "id:wug",
+			wantSql:  " AND json_extract(raw_json, '$.color_identity') LIKE ?",
+			wantArgs: []any{"%WUG%"},
+		},
+		{
+			query:    "ci>=uw",
+			wantSql:  " AND json_extract(raw_json, '$.color_identity') LIKE ?",
+			wantArgs: []any{"%UW%"},
+		},
 	}
 
 	for _, tt := range tests {
