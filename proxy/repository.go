@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	_ "github.com/glebarez/go-sqlite"
+	"tts-importer-proxy/scryfallquery"
 )
 
 // CardRepository defines the database operations for MTG cards.
@@ -147,8 +148,8 @@ func (r *SQLiteRepository) Init(ctx context.Context) error {
 	}
 
 	// Loop over formats dynamically to avoid copy-pasting format indices
-	for fmtName := range allowedFormats {
-		if !isAlphanumeric(fmtName) {
+	for fmtName := range scryfallquery.AllowedFormats {
+		if !scryfallquery.IsAlphanumeric(fmtName) {
 			continue
 		}
 		stmt := fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_legal_%s ON cards(json_extract(raw_json, '$.legalities.%s'));", fmtName, fmtName)
@@ -216,7 +217,7 @@ func (r *SQLiteRepository) SaveBatch(ctx context.Context, cards []IngestionCard)
 	defer stmt.Close()
 
 	for _, card := range cards {
-		clean := cleanName(card.Name)
+		clean := scryfallquery.CleanName(card.Name)
 		_, err := stmt.ExecContext(ctx,
 			card.ID,
 			card.Name,
@@ -265,7 +266,7 @@ func (r *SQLiteRepository) GetByID(ctx context.Context, id string) ([]byte, erro
 }
 
 func (r *SQLiteRepository) GetByNamed(ctx context.Context, fuzzy string, setCode string) ([]byte, error) {
-	clean := cleanName(fuzzy)
+	clean := scryfallquery.CleanName(fuzzy)
 	if clean == "" {
 		return nil, sql.ErrNoRows
 	}
