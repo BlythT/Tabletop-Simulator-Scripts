@@ -5,17 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 
 	_ "github.com/glebarez/go-sqlite"
-)
-
-var (
-	rxColor = regexp.MustCompile(`(?i)^c([=<>]+)(.+)$`)
 )
 
 // CardRepository defines the database operations for MTG cards.
@@ -33,10 +27,11 @@ type CardRepository interface {
 }
 
 type SQLiteRepository struct {
-	dbPath string
-	db     *sql.DB
-	cache  map[string][]byte
-	mu     sync.RWMutex
+	dbPath  string
+	db      *sql.DB
+	cache   map[string][]byte
+	cacheMu sync.RWMutex
+	mu      sync.RWMutex
 }
 
 func (r *SQLiteRepository) DBPath() string {
@@ -140,8 +135,29 @@ func (r *SQLiteRepository) Init(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_cards_set_col ON cards(set_code, collector_number);
 		CREATE INDEX IF NOT EXISTS idx_cards_rarity ON cards(json_extract(raw_json, '$.rarity'));
 		CREATE INDEX IF NOT EXISTS idx_cards_type_line ON cards(json_extract(raw_json, '$.type_line') COLLATE NOCASE);
+		CREATE INDEX IF NOT EXISTS idx_cards_cmc ON cards(CAST(json_extract(raw_json, '$.cmc') AS REAL));
+		CREATE INDEX IF NOT EXISTS idx_cards_lang ON cards(json_extract(raw_json, '$.lang'));
+		CREATE INDEX IF NOT EXISTS idx_cards_color_identity ON cards(json_extract(raw_json, '$.color_identity'));
+		CREATE INDEX IF NOT EXISTS idx_cards_power ON cards(json_extract(raw_json, '$.power'));
+		CREATE INDEX IF NOT EXISTS idx_cards_toughness ON cards(json_extract(raw_json, '$.toughness'));
+		CREATE INDEX IF NOT EXISTS idx_cards_artist ON cards(json_extract(raw_json, '$.artist') COLLATE NOCASE);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Loop over formats dynamically to avoid copy-pasting format indices
+	for fmtName := range allowedFormats {
+		if !isAlphanumeric(fmtName) {
+			continue
+		}
+		stmt := fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_legal_%s ON cards(json_extract(raw_json, '$.legalities.%s'));", fmtName, fmtName)
+		if _, err := r.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (r *SQLiteRepository) Reload(ctx context.Context, tempDBPath string) error {
@@ -176,7 +192,9 @@ func (r *SQLiteRepository) Reload(ctx context.Context, tempDBPath string) error 
 	r.db = db
 
 	// 5. Clear the in-memory lookup cache to prevent stale data
+	r.cacheMu.Lock()
 	r.cache = make(map[string][]byte)
+	r.cacheMu.Unlock()
 
 	return nil
 }
@@ -216,14 +234,24 @@ func (r *SQLiteRepository) SaveBatch(ctx context.Context, cards []IngestionCard)
 	return tx.Commit()
 }
 
-func (r *SQLiteRepository) GetByID(ctx context.Context, id string) ([]byte, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+func cacheKey(prefix string, parts ...string) string {
+	var sb strings.Builder
+	sb.WriteString(prefix)
+	for _, p := range parts {
+		sb.WriteByte(':')
+		sb.WriteString(strings.ToLower(p))
+	}
+	return sb.String()
+}
 
-	cacheKey := "id:" + id
-	if val, ok := r.getFromCacheLocked(cacheKey); ok {
+func (r *SQLiteRepository) GetByID(ctx context.Context, id string) ([]byte, error) {
+	key := cacheKey("id", id)
+	if val, ok := r.getFromCache(key); ok {
 		return val, nil
 	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	var rawJSON string
 	err := r.db.QueryRowContext(ctx, QueryGetByID, id).Scan(&rawJSON)
@@ -232,7 +260,7 @@ func (r *SQLiteRepository) GetByID(ctx context.Context, id string) ([]byte, erro
 	}
 
 	bytes := []byte(rawJSON)
-	r.setToCacheLocked(cacheKey, bytes)
+	r.setToCache(key, bytes)
 	return bytes, nil
 }
 
@@ -242,13 +270,13 @@ func (r *SQLiteRepository) GetByNamed(ctx context.Context, fuzzy string, setCode
 		return nil, sql.ErrNoRows
 	}
 
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	cacheKey := fmt.Sprintf("named:%s:%s", clean, setCode)
-	if val, ok := r.getFromCacheLocked(cacheKey); ok {
+	key := cacheKey("named", clean, setCode)
+	if val, ok := r.getFromCache(key); ok {
 		return val, nil
 	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	var rawJSON string
 	var err error
@@ -274,29 +302,26 @@ func (r *SQLiteRepository) GetByNamed(ctx context.Context, fuzzy string, setCode
 	}
 
 	bytes := []byte(rawJSON)
-	r.setToCacheLocked(cacheKey, bytes)
+	r.setToCache(key, bytes)
 	return bytes, nil
 }
 
 func (r *SQLiteRepository) GetBySetCol(ctx context.Context, setCode, colNum, lang string) ([]byte, error) {
-	setCode = strings.ToLower(setCode)
-	lang = strings.ToLower(lang)
+	key := cacheKey("setcol", setCode, colNum, lang)
+	if val, ok := r.getFromCache(key); ok {
+		return val, nil
+	}
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	cacheKey := fmt.Sprintf("setcol:%s:%s:%s", setCode, colNum, lang)
-	if val, ok := r.getFromCacheLocked(cacheKey); ok {
-		return val, nil
-	}
-
 	var rawJSON string
 	// Try specific language first
-	err := r.db.QueryRowContext(ctx, QueryGetBySetColLang, setCode, colNum, lang).Scan(&rawJSON)
+	err := r.db.QueryRowContext(ctx, QueryGetBySetColLang, strings.ToLower(setCode), colNum, strings.ToLower(lang)).Scan(&rawJSON)
 	
 	// Fallback to English or any set/col if missing
 	if err == sql.ErrNoRows {
-		err = r.db.QueryRowContext(ctx, QueryGetBySetCol, setCode, colNum).Scan(&rawJSON)
+		err = r.db.QueryRowContext(ctx, QueryGetBySetCol, strings.ToLower(setCode), colNum).Scan(&rawJSON)
 	}
 
 	if err != nil {
@@ -304,7 +329,7 @@ func (r *SQLiteRepository) GetBySetCol(ctx context.Context, setCode, colNum, lan
 	}
 
 	bytes := []byte(rawJSON)
-	r.setToCacheLocked(cacheKey, bytes)
+	r.setToCache(key, bytes)
 	return bytes, nil
 }
 
@@ -336,7 +361,12 @@ func (r *SQLiteRepository) Search(ctx context.Context, qParam, unique string) ([
 	defer r.mu.RUnlock()
 
 	whereSql, params := parseQuery(qParam)
-	sqlQuery := QueryBaseSelect + whereSql + " ORDER BY LENGTH(name) ASC LIMIT 100"
+	
+	groupBy := ""
+	if unique != "prints" {
+		groupBy = " GROUP BY name_clean"
+	}
+	sqlQuery := QueryBaseSelect + whereSql + groupBy + " ORDER BY LENGTH(name) ASC LIMIT 100"
 
 	rows, err := r.db.QueryContext(ctx, sqlQuery, params...)
 	if err != nil {
@@ -363,96 +393,18 @@ func (r *SQLiteRepository) Search(ctx context.Context, qParam, unique string) ([
 	return json.Marshal(resultMap)
 }
 
-func (r *SQLiteRepository) getFromCacheLocked(key string) ([]byte, bool) {
+func (r *SQLiteRepository) getFromCache(key string) ([]byte, bool) {
+	r.cacheMu.RLock()
+	defer r.cacheMu.RUnlock()
 	val, ok := r.cache[key]
 	return val, ok
 }
 
-func (r *SQLiteRepository) setToCacheLocked(key string, val []byte) {
-	// Prevent unbounded growth by clearing cache if it gets too large (> 5000 items)
+func (r *SQLiteRepository) setToCache(key string, val []byte) {
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
 	if len(r.cache) > 5000 {
 		r.cache = make(map[string][]byte)
 	}
 	r.cache[key] = val
-}
-
-func cleanName(name string) string {
-	var sb strings.Builder
-	for _, r := range name {
-		// Lowercase on the fly
-		if r >= 'A' && r <= 'Z' {
-			r = r + ('a' - 'A')
-		}
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			sb.WriteRune(r)
-		}
-	}
-	return sb.String()
-}
-
-func negateOp(op string, negate bool) string {
-	if negate {
-		if op == "=" {
-			return "!="
-		}
-		return "NOT " + op
-	}
-	return op
-}
-
-func parseQuery(q string) (whereSql string, params []any) {
-	uDec, err := url.QueryUnescape(q)
-	if err == nil {
-		q = uDec
-	}
-
-	q = strings.ReplaceAll(q, "+", " ")
-	tokens := strings.Fields(q)
-
-	var clauses []string
-	for _, token := range tokens {
-		negate := false
-		if strings.HasPrefix(token, "-") {
-			negate = true
-			token = token[1:]
-		}
-
-		parts := strings.SplitN(token, ":", 2)
-		if len(parts) != 2 {
-			if m := rxColor.FindStringSubmatch(token); len(m) > 2 {
-				parts = []string{"c", m[2]}
-			}
-		}
-
-		if len(parts) == 2 {
-			key := strings.ToLower(parts[0])
-			val := parts[1]
-
-			switch key {
-			case "s", "set":
-				clauses = append(clauses, "set_code "+negateOp("=", negate)+" ?")
-				params = append(params, strings.ToLower(val))
-			case "r", "rarity":
-				clauses = append(clauses, "json_extract(raw_json, '$.rarity') "+negateOp("=", negate)+" ?")
-				params = append(params, strings.ToLower(val))
-			case "t", "type":
-				clauses = append(clauses, "json_extract(raw_json, '$.type_line') "+negateOp("LIKE", negate)+" ?")
-				params = append(params, "%"+strings.ToLower(val)+"%")
-			case "id", "c", "color":
-				clauses = append(clauses, "json_extract(raw_json, '$.colors') "+negateOp("LIKE", negate)+" ?")
-				params = append(params, "%"+strings.ToUpper(val)+"%")
-			}
-		} else {
-			clean := cleanName(token)
-			if clean != "" {
-				clauses = append(clauses, "name_clean "+negateOp("LIKE", negate)+" ?")
-				params = append(params, "%"+clean+"%")
-			}
-		}
-	}
-
-	if len(clauses) > 0 {
-		whereSql = " AND " + strings.Join(clauses, " AND ")
-	}
-	return whereSql, params
 }

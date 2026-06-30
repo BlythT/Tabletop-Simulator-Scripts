@@ -68,6 +68,77 @@ func TestParseQuery(t *testing.T) {
 			wantSql:  " AND set_code = ?",
 			wantArgs: []any{"kld"},
 		},
+		// New filter tests
+		{
+			query:    "cmc:4",
+			wantSql:  " AND CAST(json_extract(raw_json, '$.cmc') AS REAL) = ?",
+			wantArgs: []any{"4"},
+		},
+		{
+			query:    "mv>=3",
+			wantSql:  " AND CAST(json_extract(raw_json, '$.cmc') AS REAL) >= ?",
+			wantArgs: []any{"3"},
+		},
+		{
+			query:    "cmc<2",
+			wantSql:  " AND CAST(json_extract(raw_json, '$.cmc') AS REAL) < ?",
+			wantArgs: []any{"2"},
+		},
+		{
+			query:    "pow>=4",
+			wantSql:  " AND json_extract(raw_json, '$.power') >= ?",
+			wantArgs: []any{"4"},
+		},
+		{
+			query:    "tou:3",
+			wantSql:  " AND json_extract(raw_json, '$.toughness') = ?",
+			wantArgs: []any{"3"},
+		},
+		{
+			query:    "o:flying",
+			wantSql:  " AND json_extract(raw_json, '$.oracle_text') LIKE ?",
+			wantArgs: []any{"%flying%"},
+		},
+		{
+			query:    "-o:flying",
+			wantSql:  " AND json_extract(raw_json, '$.oracle_text') NOT LIKE ?",
+			wantArgs: []any{"%flying%"},
+		},
+		{
+			query:    "a:hovey",
+			wantSql:  " AND json_extract(raw_json, '$.artist') LIKE ?",
+			wantArgs: []any{"%hovey%"},
+		},
+		{
+			query:    "lang:ja",
+			wantSql:  " AND json_extract(raw_json, '$.lang') = ?",
+			wantArgs: []any{"ja"},
+		},
+		{
+			query:    "f:modern",
+			wantSql:  " AND json_extract(raw_json, '$.legalities.modern') = 'legal'",
+			wantArgs: nil,
+		},
+		{
+			query:    "-f:commander",
+			wantSql:  " AND json_extract(raw_json, '$.legalities.commander') IN ('not_legal', 'banned', 'restricted')",
+			wantArgs: nil,
+		},
+		{
+			query:    "id:wug",
+			wantSql:  " AND json_extract(raw_json, '$.color_identity') LIKE ?",
+			wantArgs: []any{"%WUG%"},
+		},
+		{
+			query:    "ci>=uw",
+			wantSql:  " AND json_extract(raw_json, '$.color_identity') LIKE ?",
+			wantArgs: []any{"%UW%"},
+		},
+		{
+			query:    "f:modern')-- set:kld",
+			wantSql:  " AND set_code = ?",
+			wantArgs: []any{"kld"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -501,6 +572,14 @@ func TestSQLiteRepository(t *testing.T) {
 			Lang:            "en",
 			RawJSON:         []byte(`{"object":"card","id":"id-lotus","name":"Black Lotus","rarity":"mythic","colors":[],"type_line":"Artifact"}`),
 		},
+		{
+			ID:              "id-lotus-2",
+			Name:            "Black Lotus",
+			Set:             "2ed",
+			CollectorNumber: "233",
+			Lang:            "en",
+			RawJSON:         []byte(`{"object":"card","id":"id-lotus-2","name":"Black Lotus","rarity":"mythic","colors":[],"type_line":"Artifact"}`),
+		},
 	}
 
 	if err := repo.SaveBatch(ctx, cards); err != nil {
@@ -591,6 +670,25 @@ func TestSQLiteRepository(t *testing.T) {
 	bytes, err = repo.Search(ctx, "Black", "")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
+	}
+
+	// Test Search uniqueness grouping
+	// With unique=prints: should return both Black Lotuses
+	bytes, err = repo.Search(ctx, "Black Lotus", "prints")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if strings.Count(string(bytes), "Black Lotus") != 2 {
+		t.Errorf("expected 2 Black Lotus prints, got: %s", string(bytes))
+	}
+
+	// Without unique=prints: should return only 1 unique Black Lotus
+	bytes, err = repo.Search(ctx, "Black Lotus", "")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if strings.Count(string(bytes), "Black Lotus") != 1 {
+		t.Errorf("expected 1 unique Black Lotus, got: %s", string(bytes))
 	}
 
 	// Test Reload error (rename failure)

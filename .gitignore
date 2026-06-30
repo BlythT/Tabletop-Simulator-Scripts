@@ -61,3 +61,5 @@ test_fail.db
 test_update.db
 test_admin_update.db
 test_admin_update.db.tmp
+proxy/scryfall_syntax.md
+proxy/agents.md
