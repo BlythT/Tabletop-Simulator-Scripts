@@ -5,43 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 
 	_ "github.com/glebarez/go-sqlite"
-)
-
-var (
-	rxFilter = regexp.MustCompile(`(?i)^([a-zA-Z]+)(!=|<=|>=|[:=<>])(.+)$`)
-
-	allowedFormats = map[string]bool{
-		"standard":         true,
-		"future":           true,
-		"historic":         true,
-		"timeless":         true,
-		"gladiator":        true,
-		"pioneer":          true,
-		"modern":           true,
-		"legacy":           true,
-		"pauper":           true,
-		"vintage":          true,
-		"penny":            true,
-		"commander":        true,
-		"oathbreaker":      true,
-		"standardbrawl":    true,
-		"brawl":            true,
-		"competitivebrawl": true,
-		"alchemy":          true,
-		"paupercommander":  true,
-		"duel":             true,
-		"oldschool":        true,
-		"premodern":        true,
-		"predh":            true,
-		"tlr":              true,
-	}
 )
 
 // CardRepository defines the database operations for MTG cards.
@@ -61,7 +29,7 @@ type CardRepository interface {
 type SQLiteRepository struct {
 	dbPath string
 	db     *sql.DB
-	cache  map[string][]byte
+	cache  sync.Map
 	mu     sync.RWMutex
 }
 
@@ -117,7 +85,6 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 	return &SQLiteRepository{
 		dbPath: dbPath,
 		db:     db,
-		cache:  make(map[string][]byte),
 	}, nil
 }
 
@@ -135,7 +102,6 @@ func NewSQLiteRepositoryForIngestion(dbPath string) (*SQLiteRepository, error) {
 	return &SQLiteRepository{
 		dbPath: dbPath,
 		db:     db,
-		cache:  make(map[string][]byte),
 	}, nil
 }
 
@@ -172,31 +138,20 @@ func (r *SQLiteRepository) Init(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS idx_cards_power ON cards(json_extract(raw_json, '$.power'));
 		CREATE INDEX IF NOT EXISTS idx_cards_toughness ON cards(json_extract(raw_json, '$.toughness'));
 		CREATE INDEX IF NOT EXISTS idx_cards_artist ON cards(json_extract(raw_json, '$.artist') COLLATE NOCASE);
-		CREATE INDEX IF NOT EXISTS idx_legal_standard        ON cards(json_extract(raw_json, '$.legalities.standard'));
-		CREATE INDEX IF NOT EXISTS idx_legal_future          ON cards(json_extract(raw_json, '$.legalities.future'));
-		CREATE INDEX IF NOT EXISTS idx_legal_historic        ON cards(json_extract(raw_json, '$.legalities.historic'));
-		CREATE INDEX IF NOT EXISTS idx_legal_timeless        ON cards(json_extract(raw_json, '$.legalities.timeless'));
-		CREATE INDEX IF NOT EXISTS idx_legal_gladiator       ON cards(json_extract(raw_json, '$.legalities.gladiator'));
-		CREATE INDEX IF NOT EXISTS idx_legal_pioneer         ON cards(json_extract(raw_json, '$.legalities.pioneer'));
-		CREATE INDEX IF NOT EXISTS idx_legal_modern          ON cards(json_extract(raw_json, '$.legalities.modern'));
-		CREATE INDEX IF NOT EXISTS idx_legal_legacy          ON cards(json_extract(raw_json, '$.legalities.legacy'));
-		CREATE INDEX IF NOT EXISTS idx_legal_pauper          ON cards(json_extract(raw_json, '$.legalities.pauper'));
-		CREATE INDEX IF NOT EXISTS idx_legal_vintage         ON cards(json_extract(raw_json, '$.legalities.vintage'));
-		CREATE INDEX IF NOT EXISTS idx_legal_penny           ON cards(json_extract(raw_json, '$.legalities.penny'));
-		CREATE INDEX IF NOT EXISTS idx_legal_commander       ON cards(json_extract(raw_json, '$.legalities.commander'));
-		CREATE INDEX IF NOT EXISTS idx_legal_oathbreaker     ON cards(json_extract(raw_json, '$.legalities.oathbreaker'));
-		CREATE INDEX IF NOT EXISTS idx_legal_standardbrawl   ON cards(json_extract(raw_json, '$.legalities.standardbrawl'));
-		CREATE INDEX IF NOT EXISTS idx_legal_brawl           ON cards(json_extract(raw_json, '$.legalities.brawl'));
-		CREATE INDEX IF NOT EXISTS idx_legal_competitivebrawl ON cards(json_extract(raw_json, '$.legalities.competitivebrawl'));
-		CREATE INDEX IF NOT EXISTS idx_legal_alchemy         ON cards(json_extract(raw_json, '$.legalities.alchemy'));
-		CREATE INDEX IF NOT EXISTS idx_legal_paupercommander ON cards(json_extract(raw_json, '$.legalities.paupercommander'));
-		CREATE INDEX IF NOT EXISTS idx_legal_duel            ON cards(json_extract(raw_json, '$.legalities.duel'));
-		CREATE INDEX IF NOT EXISTS idx_legal_oldschool       ON cards(json_extract(raw_json, '$.legalities.oldschool'));
-		CREATE INDEX IF NOT EXISTS idx_legal_premodern       ON cards(json_extract(raw_json, '$.legalities.premodern'));
-		CREATE INDEX IF NOT EXISTS idx_legal_predh           ON cards(json_extract(raw_json, '$.legalities.predh'));
-		CREATE INDEX IF NOT EXISTS idx_legal_tlr             ON cards(json_extract(raw_json, '$.legalities.tlr'));
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Loop over formats dynamically to avoid copy-pasting format indices
+	for fmtName := range allowedFormats {
+		stmt := fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_legal_%s ON cards(json_extract(raw_json, '$.legalities.%s'));", fmtName, fmtName)
+		if _, err := r.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (r *SQLiteRepository) Reload(ctx context.Context, tempDBPath string) error {
@@ -231,7 +186,7 @@ func (r *SQLiteRepository) Reload(ctx context.Context, tempDBPath string) error 
 	r.db = db
 
 	// 5. Clear the in-memory lookup cache to prevent stale data
-	r.cache = make(map[string][]byte)
+	r.cache = sync.Map{}
 
 	return nil
 }
@@ -272,13 +227,13 @@ func (r *SQLiteRepository) SaveBatch(ctx context.Context, cards []IngestionCard)
 }
 
 func (r *SQLiteRepository) GetByID(ctx context.Context, id string) ([]byte, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
 	cacheKey := "id:" + id
-	if val, ok := r.getFromCacheLocked(cacheKey); ok {
+	if val, ok := r.getFromCache(cacheKey); ok {
 		return val, nil
 	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	var rawJSON string
 	err := r.db.QueryRowContext(ctx, QueryGetByID, id).Scan(&rawJSON)
@@ -287,7 +242,7 @@ func (r *SQLiteRepository) GetByID(ctx context.Context, id string) ([]byte, erro
 	}
 
 	bytes := []byte(rawJSON)
-	r.setToCacheLocked(cacheKey, bytes)
+	r.setToCache(cacheKey, bytes)
 	return bytes, nil
 }
 
@@ -297,13 +252,13 @@ func (r *SQLiteRepository) GetByNamed(ctx context.Context, fuzzy string, setCode
 		return nil, sql.ErrNoRows
 	}
 
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	cacheKey := fmt.Sprintf("named:%s:%s", clean, setCode)
-	if val, ok := r.getFromCacheLocked(cacheKey); ok {
+	cacheKey := "named:" + clean + ":" + strings.ToLower(setCode)
+	if val, ok := r.getFromCache(cacheKey); ok {
 		return val, nil
 	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	var rawJSON string
 	var err error
@@ -329,7 +284,7 @@ func (r *SQLiteRepository) GetByNamed(ctx context.Context, fuzzy string, setCode
 	}
 
 	bytes := []byte(rawJSON)
-	r.setToCacheLocked(cacheKey, bytes)
+	r.setToCache(cacheKey, bytes)
 	return bytes, nil
 }
 
@@ -337,13 +292,13 @@ func (r *SQLiteRepository) GetBySetCol(ctx context.Context, setCode, colNum, lan
 	setCode = strings.ToLower(setCode)
 	lang = strings.ToLower(lang)
 
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	cacheKey := fmt.Sprintf("setcol:%s:%s:%s", setCode, colNum, lang)
-	if val, ok := r.getFromCacheLocked(cacheKey); ok {
+	cacheKey := "setcol:" + setCode + ":" + strings.ToLower(colNum) + ":" + lang
+	if val, ok := r.getFromCache(cacheKey); ok {
 		return val, nil
 	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	var rawJSON string
 	// Try specific language first
@@ -359,7 +314,7 @@ func (r *SQLiteRepository) GetBySetCol(ctx context.Context, setCode, colNum, lan
 	}
 
 	bytes := []byte(rawJSON)
-	r.setToCacheLocked(cacheKey, bytes)
+	r.setToCache(cacheKey, bytes)
 	return bytes, nil
 }
 
@@ -391,7 +346,12 @@ func (r *SQLiteRepository) Search(ctx context.Context, qParam, unique string) ([
 	defer r.mu.RUnlock()
 
 	whereSql, params := parseQuery(qParam)
-	sqlQuery := QueryBaseSelect + whereSql + " ORDER BY LENGTH(name) ASC LIMIT 100"
+	
+	groupBy := ""
+	if unique != "prints" {
+		groupBy = " GROUP BY name_clean"
+	}
+	sqlQuery := QueryBaseSelect + whereSql + groupBy + " ORDER BY LENGTH(name) ASC LIMIT 100"
 
 	rows, err := r.db.QueryContext(ctx, sqlQuery, params...)
 	if err != nil {
@@ -418,154 +378,14 @@ func (r *SQLiteRepository) Search(ctx context.Context, qParam, unique string) ([
 	return json.Marshal(resultMap)
 }
 
-func (r *SQLiteRepository) getFromCacheLocked(key string) ([]byte, bool) {
-	val, ok := r.cache[key]
-	return val, ok
+func (r *SQLiteRepository) getFromCache(key string) ([]byte, bool) {
+	val, ok := r.cache.Load(key)
+	if !ok {
+		return nil, false
+	}
+	return val.([]byte), true
 }
 
-func (r *SQLiteRepository) setToCacheLocked(key string, val []byte) {
-	// Prevent unbounded growth by clearing cache if it gets too large (> 5000 items)
-	if len(r.cache) > 5000 {
-		r.cache = make(map[string][]byte)
-	}
-	r.cache[key] = val
-}
-
-func cleanName(name string) string {
-	var sb strings.Builder
-	for _, r := range name {
-		// Lowercase on the fly
-		if r >= 'A' && r <= 'Z' {
-			r = r + ('a' - 'A')
-		}
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			sb.WriteRune(r)
-		}
-	}
-	return sb.String()
-}
-
-func negateOp(op string, negate bool) string {
-	if negate {
-		if op == "=" {
-			return "!="
-		}
-		return "NOT " + op
-	}
-	return op
-}
-
-// comparisonOp converts a Scryfall comparison operator string into a valid SQL comparison operator.
-// Scryfall supports =, !=, <, >, <=, >= as well as the alias ":", which means "=" for exact matches.
-func comparisonOp(op string) string {
-	switch op {
-	case ":", "=":
-		return "="
-	case "!=":
-		return "!="
-	case "<":
-		return "<"
-	case ">":
-		return ">"
-	case "<=":
-		return "<="
-	case ">=":
-		return ">="
-	default:
-		return "="
-	}
-}
-
-func parseQuery(q string) (whereSql string, params []any) {
-	uDec, err := url.QueryUnescape(q)
-	if err == nil {
-		q = uDec
-	}
-
-	q = strings.ReplaceAll(q, "+", " ")
-	tokens := strings.Fields(q)
-
-	var clauses []string
-	for _, token := range tokens {
-		negate := false
-		if strings.HasPrefix(token, "-") {
-			negate = true
-			token = token[1:]
-		}
-
-		var key, opStr, val string
-		if m := rxFilter.FindStringSubmatch(token); len(m) > 3 {
-			key = m[1]
-			opStr = m[2]
-			val = m[3]
-		}
-
-		if key != "" {
-			key = strings.ToLower(key)
-			op := comparisonOp(opStr)
-
-			switch key {
-			case "s", "set":
-				clauses = append(clauses, "set_code "+negateOp("=", negate)+" ?")
-				params = append(params, strings.ToLower(val))
-			case "r", "rarity":
-				clauses = append(clauses, "json_extract(raw_json, '$.rarity') "+negateOp("=", negate)+" ?")
-				params = append(params, strings.ToLower(val))
-			case "t", "type":
-				clauses = append(clauses, "json_extract(raw_json, '$.type_line') "+negateOp("LIKE", negate)+" ?")
-				params = append(params, "%"+strings.ToLower(val)+"%")
-			case "c", "color":
-				clauses = append(clauses, "json_extract(raw_json, '$.colors') "+negateOp("LIKE", negate)+" ?")
-				params = append(params, "%"+strings.ToUpper(val)+"%")
-			case "id", "ci", "identity":
-				clauses = append(clauses, "json_extract(raw_json, '$.color_identity') "+negateOp("LIKE", negate)+" ?")
-				params = append(params, "%"+strings.ToUpper(val)+"%")
-			case "cmc", "mv":
-				clauses = append(clauses, "CAST(json_extract(raw_json, '$.cmc') AS REAL) "+negateOp(op, negate)+" ?")
-				params = append(params, val)
-			case "pow", "power":
-				clauses = append(clauses, "json_extract(raw_json, '$.power') "+negateOp(op, negate)+" ?")
-				params = append(params, val)
-			case "tou", "toughness":
-				clauses = append(clauses, "json_extract(raw_json, '$.toughness') "+negateOp(op, negate)+" ?")
-				params = append(params, val)
-			case "o", "oracle":
-				// No B-Tree index — full scan is expected and accepted
-				clauses = append(clauses, "json_extract(raw_json, '$.oracle_text') "+negateOp("LIKE", negate)+" ?")
-				params = append(params, "%"+val+"%")
-			case "a", "art", "artist":
-				// No B-Tree index for infix wildcard — artist index only helps prefix lookups
-				clauses = append(clauses, "json_extract(raw_json, '$.artist') "+negateOp("LIKE", negate)+" ?")
-				params = append(params, "%"+val+"%")
-			case "lang", "l":
-				clauses = append(clauses, "json_extract(raw_json, '$.lang') "+negateOp("=", negate)+" ?")
-				params = append(params, strings.ToLower(val))
-			case "f", "format", "legal":
-				// Legality values are: 'legal', 'not_legal', 'banned', 'restricted'.
-				// Use equality (= 'legal') so SQLite can seek the idx_legal_* expression index.
-				// For negation, match any non-legal value via IN() — still index-seekable per value.
-				formatName := strings.ToLower(val)
-				if !allowedFormats[formatName] {
-					continue
-				}
-				jsonPath := fmt.Sprintf("'$.legalities.%s'", formatName)
-				if negate {
-					clauses = append(clauses, "json_extract(raw_json, "+jsonPath+") IN ('not_legal', 'banned', 'restricted')")
-				} else {
-					clauses = append(clauses, "json_extract(raw_json, "+jsonPath+") = 'legal'")
-				}
-			}
-		} else {
-			clean := cleanName(token)
-			if clean != "" {
-				clauses = append(clauses, "name_clean "+negateOp("LIKE", negate)+" ?")
-				params = append(params, "%"+clean+"%")
-			}
-		}
-	}
-
-	if len(clauses) > 0 {
-		whereSql = " AND " + strings.Join(clauses, " AND ")
-	}
-	return whereSql, params
+func (r *SQLiteRepository) setToCache(key string, val []byte) {
+	r.cache.Store(key, val)
 }

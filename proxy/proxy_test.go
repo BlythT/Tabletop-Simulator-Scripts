@@ -522,6 +522,14 @@ func TestSQLiteRepository(t *testing.T) {
 			Lang:            "en",
 			RawJSON:         []byte(`{"object":"card","id":"id-lotus","name":"Black Lotus","rarity":"mythic","colors":[],"type_line":"Artifact"}`),
 		},
+		{
+			ID:              "id-lotus-2",
+			Name:            "Black Lotus",
+			Set:             "2ed",
+			CollectorNumber: "233",
+			Lang:            "en",
+			RawJSON:         []byte(`{"object":"card","id":"id-lotus-2","name":"Black Lotus","rarity":"mythic","colors":[],"type_line":"Artifact"}`),
+		},
 	}
 
 	if err := repo.SaveBatch(ctx, cards); err != nil {
@@ -612,6 +620,25 @@ func TestSQLiteRepository(t *testing.T) {
 	bytes, err = repo.Search(ctx, "Black", "")
 	if err != nil {
 		t.Fatalf("Search failed: %v", err)
+	}
+
+	// Test Search uniqueness grouping
+	// With unique=prints: should return both Black Lotuses
+	bytes, err = repo.Search(ctx, "Black Lotus", "prints")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if strings.Count(string(bytes), "Black Lotus") != 2 {
+		t.Errorf("expected 2 Black Lotus prints, got: %s", string(bytes))
+	}
+
+	// Without unique=prints: should return only 1 unique Black Lotus
+	bytes, err = repo.Search(ctx, "Black Lotus", "")
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+	if strings.Count(string(bytes), "Black Lotus") != 1 {
+		t.Errorf("expected 1 unique Black Lotus, got: %s", string(bytes))
 	}
 
 	// Test Reload error (rename failure)
