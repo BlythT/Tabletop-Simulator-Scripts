@@ -72,3 +72,42 @@ func TestParse(t *testing.T) {
 		})
 	}
 }
+
+func TestIsIndexable(t *testing.T) {
+	cfg := IndexConfig{
+		IndexedFields: map[string]bool{
+			"set":    true,
+			"s":      true,
+			"rarity": true,
+			"r":      true,
+		},
+		IndexNameField: false,
+	}
+
+	tests := []struct {
+		query string
+		want  bool
+	}{
+		{"set:kld", true},
+		{"r:rare", true},
+		{"set:kld r:common", true},
+		{"oracle:flying", false},
+		{"Lotus", false},
+		{"-set:kld", true},
+		{"set:kld OR r:rare", true},
+		{"(set:kld OR r:rare) -oracle:text", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			node, err := ParseAST(tt.query)
+			if err != nil {
+				t.Fatalf("ParseAST() error = %v", err)
+			}
+			if got := IsIndexable(node, cfg); got != tt.want {
+				t.Errorf("IsIndexable() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+

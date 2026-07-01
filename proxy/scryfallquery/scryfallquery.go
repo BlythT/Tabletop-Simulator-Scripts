@@ -34,3 +34,40 @@ func ParseAST(query string) (Node, error) {
 	p := newParser(lexer)
 	return p.parse()
 }
+
+// IndexConfig defines which fields and capabilities are indexed on the database schema.
+type IndexConfig struct {
+	IndexedFields  map[string]bool
+	IndexNameField bool
+}
+
+// IsIndexable walks the AST to check if all leaf query nodes map to indexed fields or columns.
+func IsIndexable(node Node, cfg IndexConfig) bool {
+	if node == nil {
+		return true
+	}
+	switch v := node.(type) {
+	case AndNode:
+		for _, child := range v.Children {
+			if !IsIndexable(child, cfg) {
+				return false
+			}
+		}
+		return true
+	case OrNode:
+		for _, child := range v.Children {
+			if !IsIndexable(child, cfg) {
+				return false
+			}
+		}
+		return true
+	case NotNode:
+		return IsIndexable(v.Child, cfg)
+	case FieldNode:
+		key := strings.ToLower(v.Key)
+		return cfg.IndexedFields[key]
+	case NameNode:
+		return cfg.IndexNameField
+	}
+	return false
+}

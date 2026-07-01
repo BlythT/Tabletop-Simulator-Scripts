@@ -20,7 +20,7 @@ type CardRepository interface {
 	GetByID(ctx context.Context, id string) ([]byte, error)
 	GetByNamed(ctx context.Context, fuzzy string, setCode string) ([]byte, error)
 	GetBySetCol(ctx context.Context, setCode, colNum, lang string) ([]byte, error)
-	GetRandom(ctx context.Context, qParam string) ([]byte, error)
+	GetRandom(ctx context.Context, qParam string, count int) ([]byte, error)
 	Search(ctx context.Context, qParam, unique string) ([]byte, error)
 	Close() error
 	Reload(ctx context.Context, tempDBPath string) error
@@ -334,27 +334,70 @@ func (r *SQLiteRepository) GetBySetCol(ctx context.Context, setCode, colNum, lan
 	return bytes, nil
 }
 
-func (r *SQLiteRepository) GetRandom(ctx context.Context, qParam string) ([]byte, error) {
+func (r *SQLiteRepository) GetRandom(ctx context.Context, qParam string, count int) ([]byte, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	if count <= 0 {
+		count = 1
+	}
+
 	whereSql, params := parseQuery(qParam)
 
-	var rawJSON string
+	var cards []json.RawMessage
+
 	if whereSql == "" {
-		// Optimization: O(1) single-query random lookup via materialized subquery
-		err := r.db.QueryRowContext(ctx, QueryGetRandomNoFilters).Scan(&rawJSON)
-		if err == nil {
-			return []byte(rawJSON), nil
+		// Use optimized O(1) single-query lookup in a loop to avoid full table scan
+		for i := 0; i < count; i++ {
+			var rawJSON string
+			err := r.db.QueryRowContext(ctx, QueryGetRandomNoFilters).Scan(&rawJSON)
+			if err != nil {
+				return nil, err
+			}
+			cards = append(cards, json.RawMessage(rawJSON))
+		}
+	} else {
+		queryStr := QueryBaseSelect + whereSql + " ORDER BY RANDOM() LIMIT ?"
+		queryParams := append(params, count)
+		rows, err := r.db.QueryContext(ctx, queryStr, queryParams...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var rawJSON string
+			if err := rows.Scan(&rawJSON); err != nil {
+				return nil, err
+			}
+			cards = append(cards, json.RawMessage(rawJSON))
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
 		}
 	}
 
-	queryStr := QueryBaseSelect + whereSql + " ORDER BY RANDOM() LIMIT 1"
-	err := r.db.QueryRowContext(ctx, queryStr, params...).Scan(&rawJSON)
-	if err != nil {
-		return nil, err
+	if len(cards) == 0 {
+		return nil, sql.ErrNoRows
 	}
-	return []byte(rawJSON), nil
+
+	if count == 1 {
+		return cards[0], nil
+	}
+
+	listRes := struct {
+		Object     string            `json:"object"`
+		TotalCards int               `json:"total_cards"`
+		HasMore    bool              `json:"has_more"`
+		Data       []json.RawMessage `json:"data"`
+	}{
+		Object:     "list",
+		TotalCards: len(cards),
+		HasMore:    false,
+		Data:       cards,
+	}
+
+	return json.Marshal(listRes)
 }
 
 func (r *SQLiteRepository) Search(ctx context.Context, qParam, unique string) ([]byte, error) {

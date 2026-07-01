@@ -10,12 +10,51 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"tts-importer-proxy/scryfallquery"
 )
 
 var scryfallBaseURL = "https://api.scryfall.com"
+
+var BatchIndexConfig = scryfallquery.IndexConfig{
+	IndexedFields: map[string]bool{
+		"s":         true,
+		"set":       true,
+		"r":         true,
+		"rarity":    true,
+		"t":         true,
+		"type":      true,
+		"c":         true,
+		"color":     true,
+		"id":        true,
+		"ci":        true,
+		"identity":  true,
+		"cmc":       true,
+		"mv":        true,
+		"pow":       true,
+		"power":     true,
+		"tou":       true,
+		"toughness": true,
+		"a":         true,
+		"art":       true,
+		"artist":    true,
+		"lang":      true,
+		"l":         true,
+		"f":         true,
+		"format":    true,
+		"legal":     true,
+		"border":    true,
+		"frame":     true,
+	},
+	IndexNameField: false,
+}
+
+const MaxBatchSize = 1000
+const MaxRandomCount = 100
 
 type Server struct {
 	repo         CardRepository
@@ -145,8 +184,19 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRandom(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	qParam := query.Get("q")
+	count := 1
+	if countStr := query.Get("count"); countStr != "" {
+		if c, err := strconv.Atoi(countStr); err == nil && c > 0 {
+			count = c
+		}
+	}
 
-	bytes, err := s.repo.GetRandom(r.Context(), qParam)
+	if count > MaxRandomCount {
+		s.sendError(w, fmt.Sprintf("Random count exceeds maximum limit of %d", MaxRandomCount), http.StatusBadRequest)
+		return
+	}
+
+	bytes, err := s.repo.GetRandom(r.Context(), qParam, count)
 	if err != nil {
 		s.sendError(w, "Could not retrieve random card: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -211,6 +261,11 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(req.URLs) > MaxBatchSize {
+		s.sendError(w, fmt.Sprintf("Batch request exceeds maximum limit of %d URLs", MaxBatchSize), http.StatusBadRequest)
+		return
+	}
+
 	var batchResults []json.RawMessage
 	for _, urlStr := range req.URLs {
 		cardBytes, err := s.resolveURL(r.Context(), urlStr)
@@ -219,12 +274,20 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 				"object":  "error",
 				"code":    "not_found",
 				"status":  404,
-				"details": fmt.Sprintf("Card not found for: %s", urlStr),
+				"details": fmt.Sprintf("Card not found for: %s: %s", urlStr, err.Error()),
 			}
 			errBytes, _ := json.Marshal(errObj)
 			batchResults = append(batchResults, json.RawMessage(errBytes))
 		} else {
-			batchResults = append(batchResults, json.RawMessage(cardBytes))
+			var listObj struct {
+				Object string            `json:"object"`
+				Data   []json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal(cardBytes, &listObj); err == nil && listObj.Object == "list" {
+				batchResults = append(batchResults, listObj.Data...)
+			} else {
+				batchResults = append(batchResults, json.RawMessage(cardBytes))
+			}
 		}
 	}
 
@@ -234,49 +297,84 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type responseRecorder struct {
+	header http.Header
+	body   []byte
+	code   int
+}
+
+func (r *responseRecorder) Header() http.Header {
+	if r.header == nil {
+		r.header = make(http.Header)
+	}
+	return r.header
+}
+
+func (r *responseRecorder) Write(b []byte) (int, error) {
+	r.body = append(r.body, b...)
+	return len(b), nil
+}
+
+func (r *responseRecorder) WriteHeader(statusCode int) {
+	r.code = statusCode
+}
+
 func (s *Server) resolveURL(ctx context.Context, urlStr string) ([]byte, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, err
 	}
 
-	path := u.Path
-	queryParams := u.Query()
+	cleanedPath := path.Clean(u.Path)
 
-	// 1. /cards/named
-	if path == "/cards/named" || strings.HasSuffix(path, "/cards/named") {
-		fuzzy := queryParams.Get("fuzzy")
-		if fuzzy == "" {
-			fuzzy = queryParams.Get("exact")
-		}
-		if fuzzy == "" {
-			return nil, fmt.Errorf("missing name parameter")
-		}
-		setCode := queryParams.Get("set")
-		return s.repo.GetByNamed(ctx, fuzzy, setCode)
+	// Restrict resolution to card paths to prevent recursion (e.g. calling batch recursively)
+	// and to prevent accessing administrative endpoints internally.
+	if !strings.HasPrefix(cleanedPath, "/cards/") {
+		return nil, fmt.Errorf("unsupported or recursive path resolution: %s", cleanedPath)
 	}
 
-	// 2. /cards/{set}/{col}/{lang}
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) >= 3 && parts[0] == "cards" {
-		setCode := parts[1]
-		colNum := parts[2]
-		lang := "en"
-		if len(parts) >= 4 {
-			lang = parts[3]
-		}
-		return s.repo.GetBySetCol(ctx, setCode, colNum, lang)
+	// Block unperformant search queries in batch resolution
+	if strings.HasPrefix(cleanedPath, "/cards/search") {
+		return nil, fmt.Errorf("search endpoint is not supported in batch requests")
 	}
 
-	// 3. /cards/{id}
-	if len(parts) == 2 && parts[0] == "cards" {
-		id := parts[1]
-		if id != "search" && id != "named" && id != "random" {
-			return s.repo.GetByID(ctx, id)
+	// Verify that random queries only contain fast, indexed filters (set/rarity)
+	if cleanedPath == "/cards/random" || strings.HasSuffix(cleanedPath, "/cards/random") {
+		qParam := u.Query().Get("q")
+		if qParam != "" {
+			astNode, err := scryfallquery.ParseAST(qParam)
+			if err != nil {
+				return nil, fmt.Errorf("invalid query syntax: %v", err)
+			}
+			if !scryfallquery.IsIndexable(astNode, BatchIndexConfig) {
+				return nil, fmt.Errorf("query contains unindexed or unsafe filters for batch resolution: %q", qParam)
+			}
 		}
 	}
 
-	return nil, fmt.Errorf("unsupported url pattern: %s", urlStr)
+	// Always route relative to the localhost server
+	u.Scheme = "http"
+	u.Host = "localhost"
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	rec := &responseRecorder{code: http.StatusOK}
+	s.mux.ServeHTTP(rec, req)
+
+	if rec.code != http.StatusOK {
+		var errObj struct {
+			Details string `json:"details"`
+		}
+		if err := json.Unmarshal(rec.body, &errObj); err == nil && errObj.Details != "" {
+			return nil, fmt.Errorf("%s", errObj.Details)
+		}
+		return nil, fmt.Errorf("resolution failed with status %d", rec.code)
+	}
+
+	return rec.body, nil
 }
 
 func (s *Server) handleRulingsPassthrough(w http.ResponseWriter, r *http.Request) {

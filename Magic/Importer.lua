@@ -389,6 +389,32 @@ local dFile={
     name=name:gsub(' #.+','')
     return num,'https://api.scryfall.com/cards/named?fuzzy='..name,alter end}
 
+function collateBoosterPack(cards)
+  if #cards ~= 16 then
+    return cards
+  end
+
+  local showcase = cards[16]
+  if showcase.object == 'error' then
+    table.remove(cards, 16)
+    return cards
+  end
+
+  local rarity = (showcase.rarity or 'common'):lower()
+  local targetIndex = nil
+
+  if rarity == 'rare' or rarity == 'mythic' then
+    targetIndex = 14
+  elseif rarity == 'uncommon' then
+    targetIndex = 11
+  else
+    targetIndex = 6
+  end
+
+  table.remove(cards, targetIndex)
+  return cards
+end
+
 function spawnDeckBatch(deck, qTbl)
   qTbl.deck = #deck
   if qTbl.deck == 0 then
@@ -401,6 +427,8 @@ function spawnDeckBatch(deck, qTbl)
   WebRequest.post(PROXY_URL .. '/batch', body, function(wr)
     local cards = JSON.decode(wr.text)
     if cards and type(cards) == 'table' then
+      cards = collateBoosterPack(cards)
+
       local successCards = {}
       for _, cardJson in ipairs(cards) do
         if cardJson.object == 'error' then
@@ -672,8 +700,11 @@ Booster.ADAMS=function(qTbl)
   for i=1,3 do table.insert(pack,u..'r:uncommon')end
   table.insert(pack,u..rarity(8,1))
   table.insert(pack,u..'t:basic')
-  table.insert(pack,apiRnd..'(border:borderless+or+frame:showcase+or+set:plist)')
-  if math.random(1,2)==1 then pack[#pack-1]=pack[#pack]end
+  
+  -- ~12.5% chance to insert showcase card (1 in 8 packs)
+  if math.random(1,8) == 1 then
+    table.insert(pack,apiRnd..'(border:borderless+or+frame:showcase+or+set:plist)')
+  end
   return pack end
 Booster.STANDARD=function(qTbl)
   local pack,u={},PROXY_URL..'/cards/random?q=f:standard+'
@@ -683,8 +714,17 @@ Booster.STANDARD=function(qTbl)
   for i=1,3 do table.insert(pack,u..'r:uncommon')end
   table.insert(pack,u..rarity(8,1))
   table.insert(pack,u..'t:basic')
-  table.insert(pack,apiRnd..'(border:borderless+or+frame:showcase+or+set:plist)')
-  if math.random(1,2)==1 then pack[#pack-1]=pack[#pack]end
+  
+  -- ~12.5% chance to insert showcase card (1 in 8 packs)
+  if math.random(1,8) == 1 then
+    table.insert(pack,apiRnd..'(border:borderless+or+frame:showcase+or+set:plist)')
+  end
+  return pack end
+Booster.STANDARD_SHOWCASE=function(qTbl)
+  local pack = Booster.STANDARD(qTbl)
+  if #pack == 15 then
+    table.insert(pack,apiRnd..'(border:borderless+or+frame:showcase+or+set:plist)')
+  end
   return pack end
 Booster.MANAMARKET=function(qTbl)
   local pack,u={},PROXY_URL..'/cards/random?q=f:standard+'
@@ -798,19 +838,34 @@ Booster.HELP=function(qTbl)
  > ]]..s)
   return Booster('plist')end
   
+function groupUrls(urls)
+  local counts = {}
+  local ordered = {}
+  for _, u in ipairs(urls) do
+    if not counts[u] then
+      counts[u] = 0
+      table.insert(ordered, u)
+    end
+    counts[u] = counts[u] + 1
+  end
+
+  local grouped = {}
+  for _, u in ipairs(ordered) do
+    local cnt = counts[u]
+    if cnt > 1 then
+      local separator = u:find('%?') and '&' or '?'
+      table.insert(grouped, u .. separator .. 'count=' .. cnt)
+    else
+      table.insert(grouped, u)
+    end
+  end
+  return grouped
+end
+
 function spawnPack(qTbl,pack)
-  qTbl.deck=#pack
-  qTbl.mode='Deck'
   log(pack)
-	--TODO: prevent dups, divert to a seperate function before setCard()
-  for i,u in pairs(pack)do
-    Wait.time(function()WebRequest.get(u,function(wr)
-					if wr.text:find('object:"error"')then log(u)end
-					--Divert here
-          setCard(wr,qTbl)end)end,i*Tick)end
-	--Store the returned pack check for dups
-	--Rerun pack if dups 3 of same or more than a pair
-	--Exclude Multiverse ID
+  local grouped = groupUrls(pack)
+  spawnDeckBatch(grouped, qTbl)
 end
 --[[Importer Data Structure]]
 Importer=setmetatable({
@@ -840,9 +895,13 @@ Importer=setmetatable({
     WebRequest.get(PROXY_URL .. '/cards/named?fuzzy='..qTbl.name,function(wr)
         local json=JSON.decode(wr.text)
         if json.all_parts then
-          qTbl.deck=#json.all_parts-1
-          for _,v in ipairs(json.all_parts)do if json.id~=v.id then
-              WebRequest.get(v.uri:gsub('https://api.scryfall.com', PROXY_URL),function(wr)setCard(wr,qTbl)end)end end
+          local t = {}
+          for _,v in ipairs(json.all_parts) do
+            if json.id~=v.id then
+              table.insert(t, v.uri:gsub('https://api.scryfall.com', PROXY_URL))
+            end
+          end
+          spawnDeckBatch(groupUrls(t), qTbl)
         --What is this elseif json.oracle
         elseif json.object=='card'then
           local oracle=json.oracle_text
@@ -951,11 +1010,7 @@ Importer=setmetatable({
       table.insert(t,fSlot[math.random(1,2)])
     else table.insert(t,fSlot[2])end
 
-    qTbl.deck=#t
-    qTbl.mode='Deck'
-    for i,u in pairs(t)do
-      Wait.time(function()WebRequest.get(u,function(wr)
-            setCard(wr,qTbl)end)end,i*Tick)end
+    spawnPack(qTbl, t)
     end,
 
   Booster=function(qTbl)
@@ -1000,9 +1055,8 @@ Importer=setmetatable({
     local n=tonumber(qTbl.full:match('%s(%d+)'))
     if n then
       qTbl.deck=n
-      for i=1,n do
-        Wait.time(function()
-        WebRequest.get(url,function(wr)setCard(wr,qTbl)end)end,i*Tick)end
+      local separator = url:find('%?') and '&' or '?'
+      WebRequest.get(url..separator..'count='..n,function(wr)spawnList(wr,qTbl)end)
     else WebRequest.get(url,function(wr)setCard(wr,qTbl)end)end end,
 
   Quality=function(qTbl)

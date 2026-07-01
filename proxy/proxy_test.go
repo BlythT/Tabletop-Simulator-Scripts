@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"tts-importer-proxy/scryfallquery"
 )
 
 // TestParseQuery verifies that the search filter parser compiles correct SQL clauses.
@@ -329,11 +330,57 @@ func (m *MockRepository) GetBySetCol(ctx context.Context, setCode, colNum, lang 
 	return []byte(`{"object":"card","id":"mock-id-setcol","name":"Custom Card","set":"` + setCode + `","collector_number":"` + colNum + `","type_line":"Creature","cmc":3.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`), nil
 }
 
-func (m *MockRepository) GetRandom(ctx context.Context, qParam string) ([]byte, error) {
+func (m *MockRepository) GetRandom(ctx context.Context, qParam string, count int) ([]byte, error) {
 	if strings.Contains(qParam, "NotFound") {
 		return nil, sql.ErrNoRows
 	}
-	return []byte(`{"object":"card","id":"mock-id-random","name":"Random Card","type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`), nil
+
+	genCard := func(q string) string {
+		name := "Random Card"
+		rarity := "common"
+		colorStr := "[]"
+
+		if strings.Contains(q, "c:w") || strings.Contains(q, "c%3Aw") {
+			name = "White Common"
+			colorStr = `["W"]`
+		} else if strings.Contains(q, "c:u") || strings.Contains(q, "c%3Au") {
+			name = "Blue Common"
+			colorStr = `["U"]`
+		} else if strings.Contains(q, "c:b") || strings.Contains(q, "c%3Ab") {
+			name = "Black Common"
+			colorStr = `["B"]`
+		} else if strings.Contains(q, "c:r") || strings.Contains(q, "c%3Ar") {
+			name = "Red Common"
+			colorStr = `["R"]`
+		} else if strings.Contains(q, "c:g") || strings.Contains(q, "c%3Ag") {
+			name = "Green Common"
+			colorStr = `["G"]`
+		} else if strings.Contains(q, "r:uncommon") || strings.Contains(q, "r%3Auncommon") {
+			name = "Uncommon Card"
+			rarity = "uncommon"
+		} else if strings.Contains(q, "r:rare") || strings.Contains(q, "r%3Arare") || strings.Contains(q, "r:mythic") || strings.Contains(q, "r%3Amythic") {
+			name = "Rare Card"
+			rarity = "rare"
+		} else if (strings.Contains(q, "t:basic") || strings.Contains(q, "t%3Abasic")) && !strings.Contains(q, "-t:basic") && !strings.Contains(q, "-t%3Abasic") {
+			name = "Basic Land"
+		}
+
+		if strings.Contains(q, "OnlyOneValid") {
+			name = "Only One Valid Card"
+		}
+
+		return fmt.Sprintf(`{"object":"card","id":"mock-id-random","name":"%s","rarity":"%s","colors":%s,"type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`, name, rarity, colorStr)
+	}
+
+	if count <= 1 {
+		return []byte(genCard(qParam)), nil
+	}
+	var data []string
+	for i := 0; i < count; i++ {
+		data = append(data, genCard(qParam))
+	}
+	listJSON := fmt.Sprintf(`{"object":"list","total_cards":%d,"has_more":false,"data":[%s]}`, count, strings.Join(data, ","))
+	return []byte(listJSON), nil
 }
 
 func (m *MockRepository) Search(ctx context.Context, qParam, unique string) ([]byte, error) {
@@ -386,7 +433,7 @@ func TestServerEndpoints(t *testing.T) {
 			method:         "GET",
 			url:            "/cards/random?q=set:kld",
 			wantStatusCode: http.StatusOK,
-			wantBody:       `{"object":"card","id":"mock-id-random","name":"Random Card","type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`,
+			wantBody:       `{"object":"card","id":"mock-id-random","name":"Random Card","rarity":"common","colors":[],"type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}`,
 		},
 		{
 			name:           "Fallback Set/Collector URL pattern",
@@ -480,7 +527,7 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":["https://api.scryfall.com/cards/named?fuzzy=NotFoundCard"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/named?fuzzy=NotFoundCard","object":"error","status":404}]`,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/named?fuzzy=NotFoundCard: Card not found matching query: NotFoundCard","object":"error","status":404}]`,
 		},
 		{
 			name:           "Batch POST endpoint with lang element",
@@ -496,7 +543,7 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":[":"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"code":"not_found","details":"Card not found for: :","object":"error","status":404}]`,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: :: parse \":\": missing protocol scheme","object":"error","status":404}]`,
 		},
 		{
 			name:           "Batch POST endpoint with unsupported pattern",
@@ -504,7 +551,7 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":["https://api.scryfall.com/cards/named"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/named","object":"error","status":404}]`,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/named: Missing 'fuzzy' or 'exact' query parameter","object":"error","status":404}]`,
 		},
 		{
 			name:           "Batch POST endpoint with generic unsupported URL",
@@ -512,7 +559,61 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":["https://api.scryfall.com/other/path"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/other/path","object":"error","status":404}]`,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/other/path: unsupported or recursive path resolution: /other/path","object":"error","status":404}]`,
+		},
+		{
+			name:           "Random endpoint with count",
+			method:         "GET",
+			url:            "/cards/random?q=set:kld&count=3",
+			wantStatusCode: http.StatusOK,
+			wantBody:       `{"object":"list","total_cards":3,"has_more":false,"data":[{"object":"card","id":"mock-id-random","name":"Random Card","rarity":"common","colors":[],"type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}},{"object":"card","id":"mock-id-random","name":"Random Card","rarity":"common","colors":[],"type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}},{"object":"card","id":"mock-id-random","name":"Random Card","rarity":"common","colors":[],"type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}]}`,
+		},
+		{
+			name:           "Random endpoint rejects count exceeding limit",
+			method:         "GET",
+			url:            "/cards/random?q=set:kld&count=101",
+			wantStatusCode: http.StatusBadRequest,
+			wantBody:       `{"code":"bad_request","details":"Random count exceeds maximum limit of 100","object":"error","status":400}`,
+		},
+		{
+			name:           "Batch POST endpoint with random count URL",
+			method:         "POST",
+			url:            "/batch",
+			body:           `{"urls":["https://api.scryfall.com/cards/random?q=set:kld&count=2"]}`,
+			wantStatusCode: http.StatusOK,
+			wantBody:       `[{"object":"card","id":"mock-id-random","name":"Random Card","rarity":"common","colors":[],"type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}},{"object":"card","id":"mock-id-random","name":"Random Card","rarity":"common","colors":[],"type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}]`,
+		},
+		{
+			name:           "Batch POST endpoint rejects recursive batch URL resolution",
+			method:         "POST",
+			url:            "/batch",
+			body:           `{"urls":["https://api.scryfall.com/batch"]}`,
+			wantStatusCode: http.StatusOK,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/batch: unsupported or recursive path resolution: /batch","object":"error","status":404}]`,
+		},
+		{
+			name:           "Batch POST endpoint rejects search endpoint URLs",
+			method:         "POST",
+			url:            "/batch",
+			body:           `{"urls":["https://api.scryfall.com/cards/search?q=lightning"]}`,
+			wantStatusCode: http.StatusOK,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/search?q=lightning: search endpoint is not supported in batch requests","object":"error","status":404}]`,
+		},
+		{
+			name:           "Batch POST endpoint rejects unsafe oracle filter in random URLs",
+			method:         "POST",
+			url:            "/batch",
+			body:           `{"urls":["https://api.scryfall.com/cards/random?q=set:kld+oracle:draw"]}`,
+			wantStatusCode: http.StatusOK,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/random?q=set:kld+oracle:draw: query contains unindexed or unsafe filters for batch resolution: \"set:kld oracle:draw\"","object":"error","status":404}]`,
+		},
+		{
+			name:           "Batch POST endpoint rejects unsafe plain name filter in random URLs",
+			method:         "POST",
+			url:            "/batch",
+			body:           `{"urls":["https://api.scryfall.com/cards/random?q=lightning"]}`,
+			wantStatusCode: http.StatusOK,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/random?q=lightning: query contains unindexed or unsafe filters for batch resolution: \"lightning\"","object":"error","status":404}]`,
 		},
 	}
 
@@ -537,6 +638,36 @@ func TestServerEndpoints(t *testing.T) {
 				t.Errorf("expected body %q, got %q", tt.wantBody, trimmedResp)
 			}
 		})
+	}
+}
+
+func TestBatchLimit(t *testing.T) {
+	mockRepo := &MockRepository{}
+	server := NewServer(mockRepo, 8000)
+
+	// Create a batch request with 1001 URLs (MaxBatchSize is 1000)
+	urls := make([]string, 1001)
+	for i := range urls {
+		urls[i] = "https://api.scryfall.com/cards/random"
+	}
+
+	bodyBytes, _ := json.Marshal(map[string][]string{"urls": urls})
+	req := httptest.NewRequest("POST", "/batch", strings.NewReader(string(bodyBytes)))
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, resp.StatusCode)
+	}
+
+	respBody, _ := io.ReadAll(resp.Body)
+	var errObj struct {
+		Details string `json:"details"`
+	}
+	json.Unmarshal(respBody, &errObj)
+	if !strings.Contains(errObj.Details, "exceeds maximum limit") {
+		t.Errorf("expected error message to contain limit warning, got %q", errObj.Details)
 	}
 }
 
@@ -638,7 +769,7 @@ func TestSQLiteRepository(t *testing.T) {
 		t.Fatalf("GetBySetCol fallback failed: %v", err)
 	}
 
-	bytes, err = repo.GetRandom(ctx, "set:sld")
+	bytes, err = repo.GetRandom(ctx, "set:sld", 1)
 	if err != nil {
 		t.Fatalf("GetRandom failed: %v", err)
 	}
@@ -1143,3 +1274,178 @@ func TestNoFullTableScans(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkGetRandom_NoFilter_Count1(b *testing.B) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = repo.GetRandom(ctx, "", 1)
+	}
+}
+
+func BenchmarkGetRandom_NoFilter_Count100(b *testing.B) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = repo.GetRandom(ctx, "", 100)
+	}
+}
+
+func BenchmarkGetRandom_NoFilter_Count1000(b *testing.B) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = repo.GetRandom(ctx, "", 1000)
+	}
+}
+
+func BenchmarkGetRandom_WithFilter_Count1(b *testing.B) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = repo.GetRandom(ctx, "set:kld", 1)
+	}
+}
+
+func BenchmarkGetRandom_WithFilter_Count100(b *testing.B) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = repo.GetRandom(ctx, "set:kld", 100)
+	}
+}
+
+func BenchmarkGetRandom_WithFilter_Count1000(b *testing.B) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = repo.GetRandom(ctx, "set:kld", 1000)
+	}
+}
+
+func makeMixedUrls(size int, iteration int) []string {
+	urls := make([]string, 0, size)
+
+	// ~20% basic lands (re-used to simulate cache hits on lands)
+	basicLandsCount := size * 20 / 100
+	if basicLandsCount < 1 && size >= 5 {
+		basicLandsCount = 1
+	}
+
+	lands := []string{"Plains", "Island", "Swamp", "Mountain", "Forest"}
+	for i := 0; i < basicLandsCount; i++ {
+		urls = append(urls, "http://localhost:8000/cards/named?fuzzy="+lands[i%len(lands)])
+	}
+
+	// ~80% unique cards (shifting collector numbers based on iteration to bypass cache hits between loops)
+	nonLandsCount := size - basicLandsCount
+	for i := 0; i < nonLandsCount; i++ {
+		uniqueColNum := ((iteration*nonLandsCount + i) % 250) + 1
+		urls = append(urls, fmt.Sprintf("http://localhost:8000/cards/kld/%d", uniqueColNum))
+	}
+
+	return urls
+}
+
+func runBatchBenchmark(b *testing.B, size int) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	server := NewServer(repo, 0)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Stop timer to modify state and generate URLs
+		b.StopTimer()
+		
+		// Clear the repository cache so each batch starts with a cold cache (excluding intra-batch duplicates)
+		repo.cacheMu.Lock()
+		repo.cache = make(map[string][]byte)
+		repo.cacheMu.Unlock()
+		
+		urls := makeMixedUrls(size, i)
+		bodyBytes, _ := json.Marshal(map[string][]string{"urls": urls})
+		b.StartTimer()
+
+		req := httptest.NewRequest("POST", "/batch", strings.NewReader(string(bodyBytes)))
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+	}
+}
+
+func BenchmarkBatchEndpoint_MixedDeck_60(b *testing.B) {
+	runBatchBenchmark(b, 60)
+}
+
+func BenchmarkBatchEndpoint_MixedDeck_100(b *testing.B) {
+	runBatchBenchmark(b, 100)
+}
+
+func BenchmarkBatchEndpoint_MixedDeck_200(b *testing.B) {
+	runBatchBenchmark(b, 200)
+}
+
+func BenchmarkBatchEndpoint_MixedDeck_400(b *testing.B) {
+	runBatchBenchmark(b, 400)
+}
+
+func TestBatchIndexConfigImporters(t *testing.T) {
+	// Standard search queries from booster generators in Importer.lua
+	// e.g. "f:standard r:common c:w", "set:mb1 (r:rare or r:mythic) frame:2015"
+	tests := []struct {
+		query string
+		want  bool
+	}{
+		{"f:standard r:common c:w", true},
+		{"set:mb1 (r:rare or r:mythic) frame:2015", true},
+		{"set:kld r:uncommon", true},
+		{"set:cmb1", true},
+		{"oracle:flying", false}, // Unindexed, should be rejected in batch random queries
+		{"Lightning Bolt", false}, // Bare word, should be rejected
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			astNode, err := scryfallquery.ParseAST(tt.query)
+			if err != nil {
+				t.Fatalf("ParseAST failed: %v", err)
+			}
+			if got := scryfallquery.IsIndexable(astNode, BatchIndexConfig); got != tt.want {
+				t.Errorf("IsIndexable() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
