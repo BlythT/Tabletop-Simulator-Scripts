@@ -35,38 +35,39 @@ func ParseAST(query string) (Node, error) {
 	return p.parse()
 }
 
-// IsBatchSafe walks the AST to ensure the query only uses fast, indexed filters
-// suitable for batch processing (set/rarity constraints only, no unindexed fields or wildcards).
-func IsBatchSafe(node Node) bool {
+// IndexConfig defines which fields and capabilities are indexed on the database schema.
+type IndexConfig struct {
+	IndexedFields  map[string]bool
+	IndexNameField bool
+}
+
+// IsIndexable walks the AST to check if all leaf query nodes map to indexed fields or columns.
+func IsIndexable(node Node, cfg IndexConfig) bool {
 	if node == nil {
 		return true
 	}
 	switch v := node.(type) {
 	case AndNode:
 		for _, child := range v.Children {
-			if !IsBatchSafe(child) {
+			if !IsIndexable(child, cfg) {
 				return false
 			}
 		}
 		return true
 	case OrNode:
 		for _, child := range v.Children {
-			if !IsBatchSafe(child) {
+			if !IsIndexable(child, cfg) {
 				return false
 			}
 		}
 		return true
 	case NotNode:
-		return IsBatchSafe(v.Child)
+		return IsIndexable(v.Child, cfg)
 	case FieldNode:
 		key := strings.ToLower(v.Key)
-		// Block oracle text queries as they trigger expensive unindexed text searches.
-		// Allow all other fields (format, set, rarity, color, type, cmc, etc.) which are either
-		// indexed or run on index-reduced datasets (e.g. format-filtered sets).
-		return key != "oracle" && key != "o"
+		return cfg.IndexedFields[key]
 	case NameNode:
-		// Bare word names trigger LIKE '%name%' wildcard prefix scans
-		return false
+		return cfg.IndexNameField
 	}
 	return false
 }

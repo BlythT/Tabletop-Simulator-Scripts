@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,39 @@ import (
 )
 
 var scryfallBaseURL = "https://api.scryfall.com"
+
+var BatchIndexConfig = scryfallquery.IndexConfig{
+	IndexedFields: map[string]bool{
+		"s":         true,
+		"set":       true,
+		"r":         true,
+		"rarity":    true,
+		"t":         true,
+		"type":      true,
+		"c":         true,
+		"color":     true,
+		"id":        true,
+		"ci":        true,
+		"identity":  true,
+		"cmc":       true,
+		"mv":        true,
+		"pow":       true,
+		"power":     true,
+		"tou":       true,
+		"toughness": true,
+		"a":         true,
+		"art":       true,
+		"artist":    true,
+		"lang":      true,
+		"l":         true,
+		"f":         true,
+		"format":    true,
+		"legal":     true,
+		"border":    true,
+		"frame":     true,
+	},
+	IndexNameField: false,
+}
 
 const MaxBatchSize = 1000
 const MaxRandomCount = 100
@@ -240,7 +274,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 				"object":  "error",
 				"code":    "not_found",
 				"status":  404,
-				"details": fmt.Sprintf("Card not found for: %s", urlStr),
+				"details": fmt.Sprintf("Card not found for: %s: %s", urlStr, err.Error()),
 			}
 			errBytes, _ := json.Marshal(errObj)
 			batchResults = append(batchResults, json.RawMessage(errBytes))
@@ -291,26 +325,28 @@ func (s *Server) resolveURL(ctx context.Context, urlStr string) ([]byte, error) 
 		return nil, err
 	}
 
+	cleanedPath := path.Clean(u.Path)
+
 	// Restrict resolution to card paths to prevent recursion (e.g. calling batch recursively)
 	// and to prevent accessing administrative endpoints internally.
-	if !strings.HasPrefix(u.Path, "/cards/") {
-		return nil, fmt.Errorf("unsupported or recursive path resolution: %s", u.Path)
+	if !strings.HasPrefix(cleanedPath, "/cards/") {
+		return nil, fmt.Errorf("unsupported or recursive path resolution: %s", cleanedPath)
 	}
 
 	// Block unperformant search queries in batch resolution
-	if strings.HasPrefix(u.Path, "/cards/search") {
+	if strings.HasPrefix(cleanedPath, "/cards/search") {
 		return nil, fmt.Errorf("search endpoint is not supported in batch requests")
 	}
 
 	// Verify that random queries only contain fast, indexed filters (set/rarity)
-	if u.Path == "/cards/random" || strings.HasSuffix(u.Path, "/cards/random") {
+	if cleanedPath == "/cards/random" || strings.HasSuffix(cleanedPath, "/cards/random") {
 		qParam := u.Query().Get("q")
 		if qParam != "" {
 			astNode, err := scryfallquery.ParseAST(qParam)
 			if err != nil {
 				return nil, fmt.Errorf("invalid query syntax: %v", err)
 			}
-			if !scryfallquery.IsBatchSafe(astNode) {
+			if !scryfallquery.IsIndexable(astNode, BatchIndexConfig) {
 				return nil, fmt.Errorf("query contains unindexed or unsafe filters for batch resolution: %q", qParam)
 			}
 		}

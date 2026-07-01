@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"tts-importer-proxy/scryfallquery"
 )
 
 // TestParseQuery verifies that the search filter parser compiles correct SQL clauses.
@@ -476,7 +477,7 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":["https://api.scryfall.com/cards/named?fuzzy=NotFoundCard"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/named?fuzzy=NotFoundCard","object":"error","status":404}]`,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/named?fuzzy=NotFoundCard: Card not found matching query: NotFoundCard","object":"error","status":404}]`,
 		},
 		{
 			name:           "Batch POST endpoint with lang element",
@@ -492,7 +493,7 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":[":"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"code":"not_found","details":"Card not found for: :","object":"error","status":404}]`,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: :: parse \":\": missing protocol scheme","object":"error","status":404}]`,
 		},
 		{
 			name:           "Batch POST endpoint with unsupported pattern",
@@ -500,7 +501,7 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":["https://api.scryfall.com/cards/named"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/named","object":"error","status":404}]`,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/named: Missing 'fuzzy' or 'exact' query parameter","object":"error","status":404}]`,
 		},
 		{
 			name:           "Batch POST endpoint with generic unsupported URL",
@@ -508,7 +509,7 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":["https://api.scryfall.com/other/path"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/other/path","object":"error","status":404}]`,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/other/path: unsupported or recursive path resolution: /other/path","object":"error","status":404}]`,
 		},
 		{
 			name:           "Random endpoint with count",
@@ -538,7 +539,7 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":["https://api.scryfall.com/batch"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/batch","object":"error","status":404}]`,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/batch: unsupported or recursive path resolution: /batch","object":"error","status":404}]`,
 		},
 		{
 			name:           "Batch POST endpoint rejects search endpoint URLs",
@@ -546,7 +547,7 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":["https://api.scryfall.com/cards/search?q=lightning"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/search?q=lightning","object":"error","status":404}]`,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/search?q=lightning: search endpoint is not supported in batch requests","object":"error","status":404}]`,
 		},
 		{
 			name:           "Batch POST endpoint rejects unsafe oracle filter in random URLs",
@@ -554,7 +555,7 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":["https://api.scryfall.com/cards/random?q=set:kld+oracle:draw"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/random?q=set:kld+oracle:draw","object":"error","status":404}]`,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/random?q=set:kld+oracle:draw: query contains unindexed or unsafe filters for batch resolution: \"set:kld oracle:draw\"","object":"error","status":404}]`,
 		},
 		{
 			name:           "Batch POST endpoint rejects unsafe plain name filter in random URLs",
@@ -562,7 +563,7 @@ func TestServerEndpoints(t *testing.T) {
 			url:            "/batch",
 			body:           `{"urls":["https://api.scryfall.com/cards/random?q=lightning"]}`,
 			wantStatusCode: http.StatusOK,
-			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/random?q=lightning","object":"error","status":404}]`,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/random?q=lightning: query contains unindexed or unsafe filters for batch resolution: \"lightning\"","object":"error","status":404}]`,
 		},
 	}
 
@@ -1369,3 +1370,32 @@ func BenchmarkBatchEndpoint_MixedDeck_200(b *testing.B) {
 func BenchmarkBatchEndpoint_MixedDeck_400(b *testing.B) {
 	runBatchBenchmark(b, 400)
 }
+
+func TestBatchIndexConfigImporters(t *testing.T) {
+	// Standard search queries from booster generators in Importer.lua
+	// e.g. "f:standard r:common c:w", "set:mb1 (r:rare or r:mythic) frame:2015"
+	tests := []struct {
+		query string
+		want  bool
+	}{
+		{"f:standard r:common c:w", true},
+		{"set:mb1 (r:rare or r:mythic) frame:2015", true},
+		{"set:kld r:uncommon", true},
+		{"set:cmb1", true},
+		{"oracle:flying", false}, // Unindexed, should be rejected in batch random queries
+		{"Lightning Bolt", false}, // Bare word, should be rejected
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			astNode, err := scryfallquery.ParseAST(tt.query)
+			if err != nil {
+				t.Fatalf("ParseAST failed: %v", err)
+			}
+			if got := scryfallquery.IsIndexable(astNode, BatchIndexConfig); got != tt.want {
+				t.Errorf("IsIndexable() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
