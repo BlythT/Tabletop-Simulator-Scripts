@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"tts-importer-proxy/scryfallquery"
 )
 
 var scryfallBaseURL = "https://api.scryfall.com"
@@ -294,6 +295,25 @@ func (s *Server) resolveURL(ctx context.Context, urlStr string) ([]byte, error) 
 	// and to prevent accessing administrative endpoints internally.
 	if !strings.HasPrefix(u.Path, "/cards/") {
 		return nil, fmt.Errorf("unsupported or recursive path resolution: %s", u.Path)
+	}
+
+	// Block unperformant search queries in batch resolution
+	if strings.HasPrefix(u.Path, "/cards/search") {
+		return nil, fmt.Errorf("search endpoint is not supported in batch requests")
+	}
+
+	// Verify that random queries only contain fast, indexed filters (set/rarity)
+	if u.Path == "/cards/random" || strings.HasSuffix(u.Path, "/cards/random") {
+		qParam := u.Query().Get("q")
+		if qParam != "" {
+			astNode, err := scryfallquery.ParseAST(qParam)
+			if err != nil {
+				return nil, fmt.Errorf("invalid query syntax: %v", err)
+			}
+			if !scryfallquery.IsBatchSafe(astNode) {
+				return nil, fmt.Errorf("query contains unindexed or unsafe filters for batch resolution: %q", qParam)
+			}
+		}
 	}
 
 	// Always route relative to the localhost server

@@ -34,3 +34,39 @@ func ParseAST(query string) (Node, error) {
 	p := newParser(lexer)
 	return p.parse()
 }
+
+// IsBatchSafe walks the AST to ensure the query only uses fast, indexed filters
+// suitable for batch processing (set/rarity constraints only, no unindexed fields or wildcards).
+func IsBatchSafe(node Node) bool {
+	if node == nil {
+		return true
+	}
+	switch v := node.(type) {
+	case AndNode:
+		for _, child := range v.Children {
+			if !IsBatchSafe(child) {
+				return false
+			}
+		}
+		return true
+	case OrNode:
+		for _, child := range v.Children {
+			if !IsBatchSafe(child) {
+				return false
+			}
+		}
+		return true
+	case NotNode:
+		return IsBatchSafe(v.Child)
+	case FieldNode:
+		key := strings.ToLower(v.Key)
+		// Block oracle text queries as they trigger expensive unindexed text searches.
+		// Allow all other fields (format, set, rarity, color, type, cmc, etc.) which are either
+		// indexed or run on index-reduced datasets (e.g. format-filtered sets).
+		return key != "oracle" && key != "o"
+	case NameNode:
+		// Bare word names trigger LIKE '%name%' wildcard prefix scans
+		return false
+	}
+	return false
+}

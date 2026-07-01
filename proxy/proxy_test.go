@@ -540,6 +540,30 @@ func TestServerEndpoints(t *testing.T) {
 			wantStatusCode: http.StatusOK,
 			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/batch","object":"error","status":404}]`,
 		},
+		{
+			name:           "Batch POST endpoint rejects search endpoint URLs",
+			method:         "POST",
+			url:            "/batch",
+			body:           `{"urls":["https://api.scryfall.com/cards/search?q=lightning"]}`,
+			wantStatusCode: http.StatusOK,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/search?q=lightning","object":"error","status":404}]`,
+		},
+		{
+			name:           "Batch POST endpoint rejects unsafe oracle filter in random URLs",
+			method:         "POST",
+			url:            "/batch",
+			body:           `{"urls":["https://api.scryfall.com/cards/random?q=set:kld+oracle:draw"]}`,
+			wantStatusCode: http.StatusOK,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/random?q=set:kld+oracle:draw","object":"error","status":404}]`,
+		},
+		{
+			name:           "Batch POST endpoint rejects unsafe plain name filter in random URLs",
+			method:         "POST",
+			url:            "/batch",
+			body:           `{"urls":["https://api.scryfall.com/cards/random?q=lightning"]}`,
+			wantStatusCode: http.StatusOK,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/cards/random?q=lightning","object":"error","status":404}]`,
+		},
 	}
 
 	for _, tt := range tests {
