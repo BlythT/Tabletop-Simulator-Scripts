@@ -1278,32 +1278,27 @@ func BenchmarkGetRandom_WithFilter_Count1000(b *testing.B) {
 	}
 }
 
-func makeMixedUrls(size int) []string {
-	baseUrls := []string{
-		"http://localhost:8000/cards/named?fuzzy=Lightning+Bolt",
-		"http://localhost:8000/cards/named?fuzzy=Counterspell",
-		"http://localhost:8000/cards/named?fuzzy=Swords+to+Plowshares",
-		"http://localhost:8000/cards/named?fuzzy=Forest",
-		"http://localhost:8000/cards/named?fuzzy=Island",
-		"http://localhost:8000/cards/named?fuzzy=Mountain",
-		"http://localhost:8000/cards/named?fuzzy=Swamp",
-		"http://localhost:8000/cards/named?fuzzy=Plains",
+func makeMixedUrls(size int, iteration int) []string {
+	urls := make([]string, 0, size)
+
+	// ~20% basic lands (re-used to simulate cache hits on lands)
+	basicLandsCount := size * 20 / 100
+	if basicLandsCount < 1 && size >= 5 {
+		basicLandsCount = 1
 	}
 
-	urls := make([]string, 0, size)
-	for i := 0; i < size; i++ {
-		// 80% named, 10% set/col, 5% ID, 5% random
-		pct := (i * 100) / size
-		if pct < 80 {
-			urls = append(urls, baseUrls[i % len(baseUrls)])
-		} else if pct < 90 {
-			urls = append(urls, fmt.Sprintf("http://localhost:8000/cards/kld/%d", 100 + (i%50)))
-		} else if pct < 95 {
-			urls = append(urls, "http://localhost:8000/cards/946afb3c-cc52-4603-b93b-a8f41a4b81cf")
-		} else {
-			urls = append(urls, "http://localhost:8000/cards/random?q=set:kld")
-		}
+	lands := []string{"Plains", "Island", "Swamp", "Mountain", "Forest"}
+	for i := 0; i < basicLandsCount; i++ {
+		urls = append(urls, "http://localhost:8000/cards/named?fuzzy="+lands[i%len(lands)])
 	}
+
+	// ~80% unique cards (shifting collector numbers based on iteration to bypass cache hits between loops)
+	nonLandsCount := size - basicLandsCount
+	for i := 0; i < nonLandsCount; i++ {
+		uniqueColNum := ((iteration*nonLandsCount + i) % 250) + 1
+		urls = append(urls, fmt.Sprintf("http://localhost:8000/cards/kld/%d", uniqueColNum))
+	}
+
 	return urls
 }
 
@@ -1315,11 +1310,20 @@ func runBatchBenchmark(b *testing.B, size int) {
 	defer repo.Close()
 	server := NewServer(repo, 0)
 
-	urls := makeMixedUrls(size)
-	bodyBytes, _ := json.Marshal(map[string][]string{"urls": urls})
-	
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
+		// Stop timer to modify state and generate URLs
+		b.StopTimer()
+		
+		// Clear the repository cache so each batch starts with a cold cache (excluding intra-batch duplicates)
+		repo.cacheMu.Lock()
+		repo.cache = make(map[string][]byte)
+		repo.cacheMu.Unlock()
+		
+		urls := makeMixedUrls(size, i)
+		bodyBytes, _ := json.Marshal(map[string][]string{"urls": urls})
+		b.StartTimer()
+
 		req := httptest.NewRequest("POST", "/batch", strings.NewReader(string(bodyBytes)))
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
