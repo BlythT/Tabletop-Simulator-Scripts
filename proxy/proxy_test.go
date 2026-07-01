@@ -1278,15 +1278,8 @@ func BenchmarkGetRandom_WithFilter_Count1000(b *testing.B) {
 	}
 }
 
-func BenchmarkBatchEndpoint_MixedDeck(b *testing.B) {
-	repo, err := NewSQLiteRepository("scryfall.db")
-	if err != nil {
-		b.Skip("scryfall.db not found, skipping benchmark")
-	}
-	defer repo.Close()
-	server := NewServer(repo, 0)
-
-	urls := []string{
+func makeMixedUrls(size int) []string {
+	baseUrls := []string{
 		"http://localhost:8000/cards/named?fuzzy=Lightning+Bolt",
 		"http://localhost:8000/cards/named?fuzzy=Counterspell",
 		"http://localhost:8000/cards/named?fuzzy=Swords+to+Plowshares",
@@ -1296,26 +1289,33 @@ func BenchmarkBatchEndpoint_MixedDeck(b *testing.B) {
 		"http://localhost:8000/cards/named?fuzzy=Swamp",
 		"http://localhost:8000/cards/named?fuzzy=Plains",
 	}
-	for len(urls) < 40 {
-		urls = append(urls, urls...)
-	}
-	urls = urls[:40]
 
-	for i := 0; i < 10; i++ {
-		urls = append(urls, "http://localhost:8000/cards/kld/128")
+	urls := make([]string, 0, size)
+	for i := 0; i < size; i++ {
+		// 80% named, 10% set/col, 5% ID, 5% random
+		pct := (i * 100) / size
+		if pct < 80 {
+			urls = append(urls, baseUrls[i % len(baseUrls)])
+		} else if pct < 90 {
+			urls = append(urls, fmt.Sprintf("http://localhost:8000/cards/kld/%d", 100 + (i%50)))
+		} else if pct < 95 {
+			urls = append(urls, "http://localhost:8000/cards/946afb3c-cc52-4603-b93b-a8f41a4b81cf")
+		} else {
+			urls = append(urls, "http://localhost:8000/cards/random?q=set:kld")
+		}
 	}
+	return urls
+}
 
-	for i := 0; i < 5; i++ {
-		urls = append(urls, "http://localhost:8000/cards/946afb3c-cc52-4603-b93b-a8f41a4b81cf")
+func runBatchBenchmark(b *testing.B, size int) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
 	}
+	defer repo.Close()
+	server := NewServer(repo, 0)
 
-	for i := 0; i < 3; i++ {
-		urls = append(urls, "http://localhost:8000/cards/random?q=set:kld")
-	}
-	for i := 0; i < 2; i++ {
-		urls = append(urls, "http://localhost:8000/cards/random?q=set:kld&count=2")
-	}
-
+	urls := makeMixedUrls(size)
 	bodyBytes, _ := json.Marshal(map[string][]string{"urls": urls})
 	
 	b.ResetTimer()
@@ -1324,4 +1324,20 @@ func BenchmarkBatchEndpoint_MixedDeck(b *testing.B) {
 		w := httptest.NewRecorder()
 		server.ServeHTTP(w, req)
 	}
+}
+
+func BenchmarkBatchEndpoint_MixedDeck_60(b *testing.B) {
+	runBatchBenchmark(b, 60)
+}
+
+func BenchmarkBatchEndpoint_MixedDeck_100(b *testing.B) {
+	runBatchBenchmark(b, 100)
+}
+
+func BenchmarkBatchEndpoint_MixedDeck_200(b *testing.B) {
+	runBatchBenchmark(b, 200)
+}
+
+func BenchmarkBatchEndpoint_MixedDeck_400(b *testing.B) {
+	runBatchBenchmark(b, 400)
 }
