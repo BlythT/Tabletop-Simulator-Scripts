@@ -525,6 +525,14 @@ func TestServerEndpoints(t *testing.T) {
 			wantStatusCode: http.StatusOK,
 			wantBody:       `[{"object":"card","id":"mock-id-random","name":"Random Card","rarity":"common","colors":[],"type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}},{"object":"card","id":"mock-id-random","name":"Random Card","rarity":"common","colors":[],"type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}]`,
 		},
+		{
+			name:           "Batch POST endpoint rejects recursive batch URL resolution",
+			method:         "POST",
+			url:            "/batch",
+			body:           `{"urls":["https://api.scryfall.com/batch"]}`,
+			wantStatusCode: http.StatusOK,
+			wantBody:       `[{"code":"not_found","details":"Card not found for: https://api.scryfall.com/batch","object":"error","status":404}]`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -548,6 +556,36 @@ func TestServerEndpoints(t *testing.T) {
 				t.Errorf("expected body %q, got %q", tt.wantBody, trimmedResp)
 			}
 		})
+	}
+}
+
+func TestBatchLimit(t *testing.T) {
+	mockRepo := &MockRepository{}
+	server := NewServer(mockRepo, 8000)
+
+	// Create a batch request with 1001 URLs (MaxBatchSize is 1000)
+	urls := make([]string, 1001)
+	for i := range urls {
+		urls[i] = "https://api.scryfall.com/cards/random"
+	}
+
+	bodyBytes, _ := json.Marshal(map[string][]string{"urls": urls})
+	req := httptest.NewRequest("POST", "/batch", strings.NewReader(string(bodyBytes)))
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected status %d, got %d", http.StatusBadRequest, resp.StatusCode)
+	}
+
+	respBody, _ := io.ReadAll(resp.Body)
+	var errObj struct {
+		Details string `json:"details"`
+	}
+	json.Unmarshal(respBody, &errObj)
+	if !strings.Contains(errObj.Details, "exceeds maximum limit") {
+		t.Errorf("expected error message to contain limit warning, got %q", errObj.Details)
 	}
 }
 

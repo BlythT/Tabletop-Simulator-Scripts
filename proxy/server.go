@@ -11,11 +11,14 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
 var scryfallBaseURL = "https://api.scryfall.com"
+
+const MaxBatchSize = 1000
 
 type Server struct {
 	repo         CardRepository
@@ -217,6 +220,11 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(req.URLs) > MaxBatchSize {
+		s.sendError(w, fmt.Sprintf("Batch request exceeds maximum limit of %d URLs", MaxBatchSize), http.StatusBadRequest)
+		return
+	}
+
 	var batchResults []json.RawMessage
 	for _, urlStr := range req.URLs {
 		cardBytes, err := s.resolveURL(r.Context(), urlStr)
@@ -274,6 +282,12 @@ func (s *Server) resolveURL(ctx context.Context, urlStr string) ([]byte, error) 
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, err
+	}
+
+	// Restrict resolution to card paths to prevent recursion (e.g. calling batch recursively)
+	// and to prevent accessing administrative endpoints internally.
+	if !strings.HasPrefix(u.Path, "/cards/") {
+		return nil, fmt.Errorf("unsupported or recursive path resolution: %s", u.Path)
 	}
 
 	// Always route relative to the localhost server
