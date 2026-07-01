@@ -2,5 +2,7 @@ scryfall.db
 scryfall.db.tmp
 *.db
 *.db.tmp
+*-shm
+*-wal
 *.exe
 coverage.out

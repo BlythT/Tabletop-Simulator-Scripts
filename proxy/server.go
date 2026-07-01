@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -145,8 +146,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRandom(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	qParam := query.Get("q")
+	count := 1
+	if countStr := query.Get("count"); countStr != "" {
+		if c, err := strconv.Atoi(countStr); err == nil && c > 0 {
+			count = c
+		}
+	}
 
-	bytes, err := s.repo.GetRandom(r.Context(), qParam)
+	bytes, err := s.repo.GetRandom(r.Context(), qParam, count)
 	if err != nil {
 		s.sendError(w, "Could not retrieve random card: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -224,7 +231,15 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 			errBytes, _ := json.Marshal(errObj)
 			batchResults = append(batchResults, json.RawMessage(errBytes))
 		} else {
-			batchResults = append(batchResults, json.RawMessage(cardBytes))
+			var listObj struct {
+				Object string            `json:"object"`
+				Data   []json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal(cardBytes, &listObj); err == nil && listObj.Object == "list" {
+				batchResults = append(batchResults, listObj.Data...)
+			} else {
+				batchResults = append(batchResults, json.RawMessage(cardBytes))
+			}
 		}
 	}
 
@@ -243,7 +258,19 @@ func (s *Server) resolveURL(ctx context.Context, urlStr string) ([]byte, error) 
 	path := u.Path
 	queryParams := u.Query()
 
-	// 1. /cards/named
+	// 1. /cards/random
+	if path == "/cards/random" || strings.HasSuffix(path, "/cards/random") {
+		q := queryParams.Get("q")
+		count := 1
+		if countStr := queryParams.Get("count"); countStr != "" {
+			if c, err := strconv.Atoi(countStr); err == nil && c > 0 {
+				count = c
+			}
+		}
+		return s.repo.GetRandom(ctx, q, count)
+	}
+
+	// 2. /cards/named
 	if path == "/cards/named" || strings.HasSuffix(path, "/cards/named") {
 		fuzzy := queryParams.Get("fuzzy")
 		if fuzzy == "" {
