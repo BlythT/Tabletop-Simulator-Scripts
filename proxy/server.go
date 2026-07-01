@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
@@ -249,61 +248,57 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type responseRecorder struct {
+	header http.Header
+	body   []byte
+	code   int
+}
+
+func (r *responseRecorder) Header() http.Header {
+	if r.header == nil {
+		r.header = make(http.Header)
+	}
+	return r.header
+}
+
+func (r *responseRecorder) Write(b []byte) (int, error) {
+	r.body = append(r.body, b...)
+	return len(b), nil
+}
+
+func (r *responseRecorder) WriteHeader(statusCode int) {
+	r.code = statusCode
+}
+
 func (s *Server) resolveURL(ctx context.Context, urlStr string) ([]byte, error) {
 	u, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, err
 	}
 
-	path := u.Path
-	queryParams := u.Query()
+	// Always route relative to the localhost server
+	u.Scheme = "http"
+	u.Host = "localhost"
 
-	// 1. /cards/random
-	if path == "/cards/random" || strings.HasSuffix(path, "/cards/random") {
-		q := queryParams.Get("q")
-		count := 1
-		if countStr := queryParams.Get("count"); countStr != "" {
-			if c, err := strconv.Atoi(countStr); err == nil && c > 0 {
-				count = c
-			}
-		}
-		return s.repo.GetRandom(ctx, q, count)
+	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+	if err != nil {
+		return nil, err
 	}
 
-	// 2. /cards/named
-	if path == "/cards/named" || strings.HasSuffix(path, "/cards/named") {
-		fuzzy := queryParams.Get("fuzzy")
-		if fuzzy == "" {
-			fuzzy = queryParams.Get("exact")
+	rec := &responseRecorder{code: http.StatusOK}
+	s.mux.ServeHTTP(rec, req)
+
+	if rec.code != http.StatusOK {
+		var errObj struct {
+			Details string `json:"details"`
 		}
-		if fuzzy == "" {
-			return nil, fmt.Errorf("missing name parameter")
+		if err := json.Unmarshal(rec.body, &errObj); err == nil && errObj.Details != "" {
+			return nil, fmt.Errorf("%s", errObj.Details)
 		}
-		setCode := queryParams.Get("set")
-		return s.repo.GetByNamed(ctx, fuzzy, setCode)
+		return nil, fmt.Errorf("resolution failed with status %d", rec.code)
 	}
 
-	// 2. /cards/{set}/{col}/{lang}
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) >= 3 && parts[0] == "cards" {
-		setCode := parts[1]
-		colNum := parts[2]
-		lang := "en"
-		if len(parts) >= 4 {
-			lang = parts[3]
-		}
-		return s.repo.GetBySetCol(ctx, setCode, colNum, lang)
-	}
-
-	// 3. /cards/{id}
-	if len(parts) == 2 && parts[0] == "cards" {
-		id := parts[1]
-		if id != "search" && id != "named" && id != "random" {
-			return s.repo.GetByID(ctx, id)
-		}
-	}
-
-	return nil, fmt.Errorf("unsupported url pattern: %s", urlStr)
+	return rec.body, nil
 }
 
 func (s *Server) handleRulingsPassthrough(w http.ResponseWriter, r *http.Request) {
