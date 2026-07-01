@@ -518,6 +518,13 @@ func TestServerEndpoints(t *testing.T) {
 			wantBody:       `{"object":"list","total_cards":3,"has_more":false,"data":[{"object":"card","id":"mock-id-random","name":"Random Card","rarity":"common","colors":[],"type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}},{"object":"card","id":"mock-id-random","name":"Random Card","rarity":"common","colors":[],"type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}},{"object":"card","id":"mock-id-random","name":"Random Card","rarity":"common","colors":[],"type_line":"Sorcery","cmc":2.0,"oracle_text":"","layout":"normal","image_uris":{"normal":"http://127.0.0.1/normal.jpg"}}]}`,
 		},
 		{
+			name:           "Random endpoint rejects count exceeding limit",
+			method:         "GET",
+			url:            "/cards/random?q=set:kld&count=101",
+			wantStatusCode: http.StatusBadRequest,
+			wantBody:       `{"code":"bad_request","details":"Random count exceeds maximum limit of 100","object":"error","status":400}`,
+		},
+		{
 			name:           "Batch POST endpoint with random count URL",
 			method:         "POST",
 			url:            "/batch",
@@ -1190,5 +1197,131 @@ func TestNoFullTableScans(t *testing.T) {
 				t.Logf("Full query plan for %s:\n\t%s", tc.name, strings.Join(details, "\n\t"))
 			}
 		})
+	}
+}
+
+func BenchmarkGetRandom_NoFilter_Count1(b *testing.B) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = repo.GetRandom(ctx, "", 1)
+	}
+}
+
+func BenchmarkGetRandom_NoFilter_Count100(b *testing.B) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = repo.GetRandom(ctx, "", 100)
+	}
+}
+
+func BenchmarkGetRandom_NoFilter_Count1000(b *testing.B) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = repo.GetRandom(ctx, "", 1000)
+	}
+}
+
+func BenchmarkGetRandom_WithFilter_Count1(b *testing.B) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = repo.GetRandom(ctx, "set:kld", 1)
+	}
+}
+
+func BenchmarkGetRandom_WithFilter_Count100(b *testing.B) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = repo.GetRandom(ctx, "set:kld", 100)
+	}
+}
+
+func BenchmarkGetRandom_WithFilter_Count1000(b *testing.B) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = repo.GetRandom(ctx, "set:kld", 1000)
+	}
+}
+
+func BenchmarkBatchEndpoint_MixedDeck(b *testing.B) {
+	repo, err := NewSQLiteRepository("scryfall.db")
+	if err != nil {
+		b.Skip("scryfall.db not found, skipping benchmark")
+	}
+	defer repo.Close()
+	server := NewServer(repo, 0)
+
+	urls := []string{
+		"http://localhost:8000/cards/named?fuzzy=Lightning+Bolt",
+		"http://localhost:8000/cards/named?fuzzy=Counterspell",
+		"http://localhost:8000/cards/named?fuzzy=Swords+to+Plowshares",
+		"http://localhost:8000/cards/named?fuzzy=Forest",
+		"http://localhost:8000/cards/named?fuzzy=Island",
+		"http://localhost:8000/cards/named?fuzzy=Mountain",
+		"http://localhost:8000/cards/named?fuzzy=Swamp",
+		"http://localhost:8000/cards/named?fuzzy=Plains",
+	}
+	for len(urls) < 40 {
+		urls = append(urls, urls...)
+	}
+	urls = urls[:40]
+
+	for i := 0; i < 10; i++ {
+		urls = append(urls, "http://localhost:8000/cards/kld/128")
+	}
+
+	for i := 0; i < 5; i++ {
+		urls = append(urls, "http://localhost:8000/cards/946afb3c-cc52-4603-b93b-a8f41a4b81cf")
+	}
+
+	for i := 0; i < 3; i++ {
+		urls = append(urls, "http://localhost:8000/cards/random?q=set:kld")
+	}
+	for i := 0; i < 2; i++ {
+		urls = append(urls, "http://localhost:8000/cards/random?q=set:kld&count=2")
+	}
+
+	bodyBytes, _ := json.Marshal(map[string][]string{"urls": urls})
+	
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		req := httptest.NewRequest("POST", "/batch", strings.NewReader(string(bodyBytes)))
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
 	}
 }

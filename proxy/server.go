@@ -19,6 +19,7 @@ import (
 var scryfallBaseURL = "https://api.scryfall.com"
 
 const MaxBatchSize = 1000
+const MaxRandomCount = 100
 
 type Server struct {
 	repo         CardRepository
@@ -153,6 +154,11 @@ func (s *Server) handleRandom(w http.ResponseWriter, r *http.Request) {
 		if c, err := strconv.Atoi(countStr); err == nil && c > 0 {
 			count = c
 		}
+	}
+
+	if count > MaxRandomCount {
+		s.sendError(w, fmt.Sprintf("Random count exceeds maximum limit of %d", MaxRandomCount), http.StatusBadRequest)
+		return
 	}
 
 	bytes, err := s.repo.GetRandom(r.Context(), qParam, count)
